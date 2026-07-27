@@ -1,0 +1,13 @@
+[package]
+name = "pgr"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4.6.4", features = ["derive"] }
+etherparse = "0.21.0"
+pcap-parser = "0.17.0"
+time = { version = "0.3.54", features = ["formatting", "macros", "local-offset"] }
+tokio = { version = "1.53.0", features = ["full"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["fmt", "time"] }
