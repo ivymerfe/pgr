@@ -6,9 +6,12 @@ use std::error::Error;
 
 use tracing::{error, info};
 
+use crate::replay::ReplayState;
+
 mod parser;
+mod dump;
 mod replay;
-mod dumper;
+mod compare;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None, arg_required_else_help = true, disable_help_flag = true)]
@@ -96,7 +99,9 @@ async fn main()-> Result<(), Box<dyn Error>> {
                 error!("Input path does not exist: {}", input_path.display());
                 return Ok(());
             }
-            
+            info!("Replaying {}[port={cap_port}] at host={host} port={port} user={user}", input_path.display());
+            let mut state = ReplayState::new(host, port, user, pass);
+            state.replay(input_path, cap_port);
         }
         Commands::Dump { input, output, cap_port } => {
             let mut input_path = path::absolute(&input)?;
@@ -111,8 +116,8 @@ async fn main()-> Result<(), Box<dyn Error>> {
                 error!("Input path does not exist: {}", input_path.display());
                 return Ok(());
             }
-            info!("Dumping {} -> {}", input_path.display(), output_path.display());
-            dumper::dump(&input_path, &output_path, cap_port)?;
+            info!("Dumping {}[port={cap_port}] -> {}", input_path.display(), output_path.display());
+            dump::dump(&input_path, &output_path, cap_port)?;
         }
     }
     Ok(())

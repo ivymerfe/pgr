@@ -1,32 +1,46 @@
 use bytes::{Buf, Bytes, BytesMut};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, net::SocketAddr};
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct PqStream {
     staging: BytesMut,
     next_seq: Option<u32>,
     unordered_chunks: BTreeMap<u32, Bytes>,
-    pub frame_ts: Option<u64>
+    pub addr: SocketAddr,
+    last_ts: u64,
+    frame_ts: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
 pub struct PqFrame {
+    pub ts: u64,
     pub tag: u8,
     pub payload: Bytes,
 }
 
 impl PqStream {
+    pub fn new(addr: SocketAddr) -> Self {
+        Self {
+            staging: BytesMut::new(),
+            next_seq: None,
+            unordered_chunks: BTreeMap::new(),
+            addr,
+            last_ts: 0,
+            frame_ts: None,
+        }
+    }
+
     pub fn set_isn(&mut self, syn_seq: u32) {
         if self.next_seq.is_none() {
             self.next_seq = Some(syn_seq.wrapping_add(1));
         }
     }
 
-    pub fn ingest(&mut self, seq: u32, payload: &[u8]) {
-        if payload.is_empty() {
-            return;
-        }
+    pub fn set_ts(&mut self, ts: u64) {
+        self.last_ts = ts;
+    }
 
+    pub fn ingest(&mut self, seq: u32, payload: &[u8]) {
         let next = match self.next_seq {
             None => {
                 self.next_seq = Some(seq);
@@ -84,6 +98,8 @@ impl PqStream {
     }
 
     pub fn pop_frame(&mut self) -> Result<Option<PqFrame>, &'static str> {
+        let ts = self.frame_ts.take().unwrap_or(self.last_ts);
+
         if self.len() < 4 {
             return Ok(None);
         }
@@ -124,7 +140,9 @@ impl PqStream {
         let mut frame_bytes = self.staging.split_to(frame_length).freeze();
         frame_bytes.advance(frame_offset);
 
+        self.frame_ts = Some(ts);
         Ok(Some(PqFrame {
+            ts,
             tag,
             payload: frame_bytes,
         }))
