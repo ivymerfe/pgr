@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+bytes = "1.12.1"
 clap = { version = "4.6.4", features = ["derive"] }
 etherparse = "0.21.0"
 pcap-parser = "0.17.0"

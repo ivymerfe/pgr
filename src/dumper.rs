@@ -19,7 +19,7 @@ pub fn dump(
     let mut capture_reader = CaptureReader::new(reader, cap_port)?;
     capture_reader.read(&mut |event| {
         let frame = event.frame;
-        match parse_pg_message(frame.tag, frame.payload) {
+        match parse_pg_message(frame.tag, &frame.payload) {
             Ok(msg) => {
                 writeln!(writer, "[{}] ({}) -> {}", event.addr, event.timestamp, msg);
             }

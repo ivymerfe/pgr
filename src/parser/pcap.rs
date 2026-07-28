@@ -6,10 +6,10 @@ use std::io::Read;
 use std::net::SocketAddr;
 use tracing::warn;
 
-pub struct CaptureEvent<'a> {
+pub struct CaptureEvent {
     pub addr: SocketAddr,
     pub timestamp: u64,
-    pub frame: PqFrame<'a>,
+    pub frame: PqFrame,
 }
 
 pub struct CaptureReader<'a> {
@@ -121,7 +121,9 @@ impl<'a> CaptureReader<'a> {
             if tcp_payload.is_empty() {
                 return;
             }
-            client_stream.ingest(effective_seq, tcp_payload, timestamp);
+            client_stream.ingest(effective_seq, tcp_payload);
+            let frame_ts = *client_stream.frame_ts.get_or_insert(timestamp);
+            let mut frame_count = 0;
 
             loop {
                 match client_stream.pop_frame() {
@@ -129,9 +131,10 @@ impl<'a> CaptureReader<'a> {
                     Ok(Some(frame)) => {
                         cb(CaptureEvent {
                             addr: client,
-                            timestamp,
+                            timestamp: frame_ts,
                             frame: frame,
                         });
+                        frame_count += 1;
                     }
                     Err(_corrupt) => {
                         warn!("Corrupted stream -> resync");
@@ -141,6 +144,9 @@ impl<'a> CaptureReader<'a> {
                         }
                     }
                 }
+            }
+            if frame_count > 0 {
+                client_stream.frame_ts.take();
             }
         }
     }
