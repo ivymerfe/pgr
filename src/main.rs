@@ -8,7 +8,6 @@ use tracing::{error, info};
 
 mod parser;
 mod replay;
-mod replay_client;
 mod dumper;
 
 #[derive(Parser)]
