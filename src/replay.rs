@@ -2,16 +2,16 @@ use std::{
     collections::HashMap,
     error::Error,
     net::{IpAddr, SocketAddr},
+    path::Path,
     sync::Arc,
     time::Duration,
 };
 
 use pgwire::api::client::Config;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::time::Instant;
+use tokio::{fs::File, io::AsyncWriteExt, time::Instant};
 use tracing::{error, info};
 
-use crate::replay_client::ReplayClient;
 use crate::{
     parser::{
         pcap::{CaptureReader, ReadState},
@@ -19,8 +19,10 @@ use crate::{
     },
     replay_client::spawn_client,
 };
+use crate::{replay_client::ReplayClient, replay_frame_tags::should_replay_frame};
 
 pub struct ReplayState {
+    map_file: File,
     config: Arc<Config>,
     clients: HashMap<SocketAddr, ReplayClient>,
     capture_start: Option<Instant>,
@@ -29,7 +31,8 @@ pub struct ReplayState {
 }
 
 impl ReplayState {
-    pub fn new(
+    pub async fn new<P: AsRef<Path>>(
+        client_map_path: P,
         host: String,
         port: u16,
         dbname: String,
@@ -46,13 +49,25 @@ impl ReplayState {
             config.password(password.unwrap());
         }
         config.application_name("pgr");
+
         Ok(Self {
+            map_file: File::create(&client_map_path).await?,
             config: Arc::new(config),
             clients: HashMap::new(),
             capture_start: None,
             capture_start_ts: None,
             rps_counter: Arc::new(AtomicU64::new(0)),
         })
+    }
+
+    async fn write_client_map(
+        &mut self,
+        pcap_addr: SocketAddr,
+        replay_addr: SocketAddr,
+    ) -> Result<(), Box<dyn Error>> {
+        let entry = format!("{pcap_addr} -> {replay_addr}\n");
+        self.map_file.write_all(entry.as_bytes()).await?;
+        Ok(())
     }
 
     pub async fn replay(
@@ -96,7 +111,6 @@ impl ReplayState {
                 }
             }
         }
-        info!("Done");
         Ok(())
     }
 
@@ -119,10 +133,6 @@ impl ReplayState {
         }
     }
 
-    fn check_tag(tag: u8) -> bool {
-        matches!(tag, b'Q' | b'P' | b'B' | b'D' | b'E' | b'S')
-    }
-
     async fn process_frame(&mut self, frame: PqFrame<'_>) -> Result<(), Box<dyn Error>> {
         let tag = frame.tag;
         let addr = frame.addr;
@@ -134,8 +144,9 @@ impl ReplayState {
             return Ok(());
         }
         if !self.clients.contains_key(&addr) {
-            match spawn_client(self.config.clone()).await {
+            match spawn_client(addr, self.config.clone()).await {
                 Ok(handle) => {
+                    self.write_client_map(addr, handle.addr).await?;
                     self.clients.insert(addr, handle);
                 }
                 Err(e) => {
@@ -143,7 +154,7 @@ impl ReplayState {
                 }
             }
         }
-        if !Self::check_tag(tag) {
+        if !should_replay_frame(tag) {
             return Ok(());
         }
         if let Some(client) = self.clients.get(&addr) {

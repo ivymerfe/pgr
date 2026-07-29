@@ -12,6 +12,7 @@ use crate::replay::ReplayState;
 
 mod parser;
 mod dump;
+mod replay_frame_tags;
 mod replay;
 mod replay_client;
 mod compare;
@@ -36,6 +37,13 @@ enum Commands {
             value_parser = clap::value_parser!(u16).range(1..)
         )]
         cap_port: u16,
+
+        #[arg(
+            short = 'm', 
+            long, 
+            default_value = "replay.map", 
+        )]
+        client_map: PathBuf,
 
         #[arg(
             short,
@@ -94,8 +102,12 @@ enum Commands {
         #[arg(required=true)]
         c2: PathBuf,
 
-        #[arg(required=true)]
-        translations: PathBuf,
+        #[arg(
+            short = 'm', 
+            long, 
+            default_value = "replay.map", 
+        )]
+        client_map: PathBuf,
 
         #[arg(
             long = "p2", 
@@ -123,7 +135,7 @@ async fn main()-> Result<(), Box<dyn Error>> {
     tracing_subscriber::fmt().with_timer(timer).init();
 
     match cli.command {
-        Commands::Replay { input, cap_port, host, port, dbname, user, pass } => {
+        Commands::Replay { input, cap_port, client_map, host, port, dbname, user, pass } => {
             let mut input_path = path::absolute(&input)?;
             if !input_path.exists() {
                 input_path.set_extension("pcap");  
@@ -132,8 +144,10 @@ async fn main()-> Result<(), Box<dyn Error>> {
                 error!("Input path does not exist: {}", input_path.display());
                 return Ok(());
             }
-            info!("Replaying {}[port={cap_port}] at host={host} port={port} user={user}", input_path.display());
-            let mut state = ReplayState::new(host, port, dbname, user, pass)?;
+            let map_path = path::absolute(&client_map)?;
+            info!("Replaying {}[port={cap_port},map={}] at host={host} port={port} user={user}",
+                map_path.display(), input_path.display());
+            let mut state = ReplayState::new(map_path, host, port, dbname, user, pass).await?;
             state.replay(input_path, cap_port).await?;
         }
         Commands::Dump { input, output, cap_port } => {
@@ -152,7 +166,7 @@ async fn main()-> Result<(), Box<dyn Error>> {
             info!("Dump {}[port={cap_port}] -> {}", input_path.display(), output_path.display());
             dump::dump(&input_path, &output_path, cap_port)?;
         }
-        Commands::Compare { c1, c2, translations, port1, port2 } => {
+        Commands::Compare { c1, c2, client_map, port1, port2 } => {
             let mut c1_path = path::absolute(&c1)?;
             if !c1_path.exists() {
                 c1_path.set_extension("pcap");  
@@ -169,15 +183,15 @@ async fn main()-> Result<(), Box<dyn Error>> {
                 error!("Second capture file does not exist: {}", c2_path.display());
                 return Ok(());
             }
-            let t_path = path::absolute(&translations)?;
-            if !t_path.exists() {
-                error!("Translations file does not exist: {}", t_path.display());
+            let map_path = path::absolute(&client_map)?;
+            if !map_path.exists() {
+                error!("Translations file does not exist: {}", map_path.display());
                 return Ok(());
             }
             info!("Compare {}[{port1}] <=> {}[{port2}] via {}",
-                c1_path.display(), c2_path.display(), t_path.display());
+                c1_path.display(), c2_path.display(), map_path.display());
             let mut state = CompareState::new();
-            state.load_translation(&t_path)?;
+            state.load_map(&map_path)?;
             state.compare(c1, c2, port1, port2)?;
             println!("{state}");
         }

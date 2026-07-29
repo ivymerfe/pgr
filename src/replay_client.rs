@@ -2,10 +2,7 @@ use std::{
     collections::BTreeMap,
     net::SocketAddr,
     pin::Pin,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::Arc,
     task::{Context, Poll},
 };
 
@@ -24,7 +21,7 @@ use pgwire::{
 use pin_project::pin_project;
 use tokio::{io::AsyncWriteExt, net::TcpStream, sync::mpsc};
 use tokio_util::codec::Framed;
-use tracing::warn;
+use tracing::{error, info};
 
 type ClientChannel = mpsc::UnboundedSender<Vec<u8>>;
 
@@ -85,13 +82,19 @@ impl Stream for ReplaySocket {
 
 pub struct ReplayClient {
     pub tx: ClientChannel,
+    pub addr: SocketAddr,
 }
 
-pub async fn spawn_client(config: Arc<Config>) -> Result<ReplayClient, Box<dyn std::error::Error>> {
+pub async fn spawn_client(
+    pcap_addr: SocketAddr,
+    config: Arc<Config>,
+) -> Result<ReplayClient, Box<dyn std::error::Error>> {
     let addr = *config.get_hostaddrs().first().expect("no hostaddr");
     let port = *config.get_ports().first().expect("no port");
     let socket_addr = SocketAddr::new(addr, port);
     let stream = TcpStream::connect(socket_addr).await?;
+    let local_addr = stream.local_addr()?;
+
     let socket = Framed::new(stream, PgWireMessageClientCodec::default());
 
     let mut client = ReplaySocket {
@@ -116,22 +119,27 @@ pub async fn spawn_client(config: Arc<Config>) -> Result<ReplayClient, Box<dyn s
     }
 
     let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    tokio::spawn(client_io_loop(socket_addr, client.socket, rx));
-    Ok(ReplayClient { tx })
+    tokio::spawn(client_io_loop(local_addr, pcap_addr, client.socket, rx));
+    Ok(ReplayClient {
+        tx,
+        addr: local_addr,
+    })
 }
 
 async fn client_io_loop(
-    addr: SocketAddr,
+    local_addr: SocketAddr,
+    pcap_addr: SocketAddr,
     mut socket: Framed<TcpStream, PgWireMessageClientCodec>,
     mut rx: mpsc::UnboundedReceiver<Vec<u8>>,
 ) {
+    info!("[{local_addr};pcap={pcap_addr}] Connected");
     loop {
         tokio::select! {
             frame = rx.recv() => {
                 match frame {
                     Some(raw) => {
                         if let Err(e) = socket.get_mut().write_all(&raw).await {
-                            warn!("[{addr}] send failed: {e}");
+                            error!("[{local_addr};pcap={pcap_addr}] send failed: {e}");
                             break;
                         }
                     }
@@ -142,7 +150,7 @@ async fn client_io_loop(
                 match msg {
                     Some(Ok(_backend_msg)) => {}
                     Some(Err(e)) => {
-                        warn!("[{addr}] recv failed: {e}");
+                        error!("[{local_addr};pcap={pcap_addr}] recv failed: {e}");
                         break;
                     }
                     None => break,
@@ -150,4 +158,5 @@ async fn client_io_loop(
             }
         }
     }
+    info!("[{local_addr};pcap={pcap_addr}] Disconnected");
 }
