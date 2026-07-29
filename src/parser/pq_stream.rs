@@ -5,16 +5,15 @@ use tracing::warn;
 pub struct PqStream {
     buf: Vec<u8>,
     head: usize,
+    packet_head: usize,
+    drained: usize,
     next_seq: Option<u32>,
     reorder: BTreeMap<u32, Vec<u8>>,
+    packet_ts: Option<u64>,
     pub addr: SocketAddr,
-    frame_ts: u64,
-    update_ts: bool,
 }
 
 pub struct PqFrame<'a> {
-    pub addr: SocketAddr,
-    pub ts: u64,
     pub tag: u8,
     pub offset: usize,
     pub payload: &'a [u8],
@@ -25,11 +24,12 @@ impl PqStream {
         Self {
             buf: Vec::new(),
             head: 0,
+            packet_head: 0,
+            drained: 0,
             next_seq: None,
             reorder: BTreeMap::new(),
             addr,
-            frame_ts: 0,
-            update_ts: true,
+            packet_ts: None,
         }
     }
 
@@ -39,18 +39,10 @@ impl PqStream {
         }
     }
 
-    pub fn set_ts(&mut self, ts: u64) {
-        if self.update_ts {
-            self.frame_ts = ts;
-            self.update_ts = false;
-        }
-    }
-
-    pub fn ingest(&mut self, seq: u32, payload: &[u8]) {
+    pub fn ingest(&mut self, seq: u32, payload: &[u8], ts: u64) {
         if payload.is_empty() {
             return;
         }
-
         let next = match self.next_seq {
             None => {
                 self.next_seq = Some(seq);
@@ -62,7 +54,11 @@ impl PqStream {
         let delta = seq.wrapping_sub(next) as i32;
 
         if delta == 0 {
+            self.packet_ts = Some(ts);
+            self.packet_head = self.buf.len();
+
             self.buf.extend_from_slice(payload);
+
             let mut new_next = next.wrapping_add(payload.len() as u32);
             while let Some(pending) = self.reorder.remove(&new_next) {
                 new_next = new_next.wrapping_add(pending.len() as u32);
@@ -72,7 +68,7 @@ impl PqStream {
         } else if delta < 0 {
             let overlap = (-delta) as usize;
             if overlap < payload.len() {
-                self.ingest(next, &payload[overlap..]);
+                self.ingest(next, &payload[overlap..], ts);
             }
         } else {
             self.reorder.insert(seq, payload.to_vec());
@@ -83,7 +79,31 @@ impl PqStream {
         self.buf.len().saturating_sub(self.head)
     }
 
-    pub fn peek_frame(&mut self, is_frontend: bool) -> Option<(usize, PqFrame<'_>)> {
+    pub fn offset(&self) -> usize {
+        self.drained + self.head
+    }
+
+    pub fn read_ts(&mut self) -> Option<u64> {
+        return self.packet_ts;
+    }
+
+    pub fn take_ts(&mut self) -> Option<u64> {
+        return self.packet_ts.take();
+    }
+
+    pub fn read_packet(&self) -> Option<&[u8]> {
+        let head = self.head.max(self.packet_head);
+        if self.buf.len() - head < 5 {
+            return None;
+        }
+        return Some(&self.buf[head..]);
+    }
+
+    pub fn read_tag(&self) -> u8 {
+        return self.buf[self.head];
+    }
+
+    pub fn read_frame(&self) -> Option<(usize, PqFrame<'_>)> {
         if self.len() < 4 {
             return None;
         }
@@ -93,9 +113,7 @@ impl PqStream {
             // 1. Headerless messages (SSLRequest, StartupMessage, CancelRequest)
             let length = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
             if !(8..=10_000_000).contains(&length) {
-                self.head += 4;
-                self.head = self.resync(is_frontend);
-                return self.peek_frame(is_frontend);
+                return None;
             }
             if buf.len() < length {
                 return None;
@@ -108,9 +126,7 @@ impl PqStream {
             }
             let length = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
             if !(4..=10_000_000).contains(&length) {
-                self.head += 5;
-                self.head = self.resync(is_frontend);
-                return self.peek_frame(is_frontend);
+                return None;
             }
             let frame_length = 1 + length;
             if buf.len() < frame_length {
@@ -119,10 +135,7 @@ impl PqStream {
             (buf[0], 5, frame_length)
         };
         let buf = &self.buf[self.head..self.head + frame_length];
-        self.update_ts = true;
         let frame = PqFrame {
-            addr: self.addr,
-            ts: self.frame_ts,
             tag,
             offset: frame_offset,
             payload: buf,
@@ -134,6 +147,8 @@ impl PqStream {
         if self.head > 65_536 && self.head >= self.buf.len() / 2 {
             self.buf.drain(0..self.head);
             self.head = 0;
+            self.packet_head = self.packet_head.saturating_sub(self.head);
+            self.drained += self.head;
         }
     }
 
@@ -142,16 +157,14 @@ impl PqStream {
         self.compact_if_needed();
     }
 
-    fn resync(&self, is_frontend: bool) -> usize {
-        warn!("[{}] corrupted stream: resync", self.addr);
-
+    pub fn sync(&mut self, is_frontend: bool) {
         let valid_tags: &[u8] = if is_frontend {
-            b"QPBDECfcpSHX"
+            b"QPBDECfcpSHX\0"
         } else {
-            b"RKZCS123nsITtDEAN"
+            b"RKZCS123nsITtDEAN\0"
         };
         let mut offset = self.head;
-        while offset <= self.buf.len() {
+        while offset + 4 < self.buf.len() {
             let tag = self.buf[self.head];
             let len = u32::from_be_bytes([
                 self.buf[self.head + 1],
@@ -161,10 +174,13 @@ impl PqStream {
             ]) as usize;
 
             if valid_tags.contains(&tag) && (4..=10_000_000).contains(&len) {
-                return offset;
+                break;
             }
             offset += 1;
         }
-        return offset;
+        if offset > self.head {
+            warn!("[{}] corrupted stream: resync", self.addr);
+        }
+        self.head = offset;
     }
 }

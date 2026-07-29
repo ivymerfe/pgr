@@ -18,10 +18,12 @@ pub fn dump(
     loop {
         match capture_reader.next() {
             ReadState::Ok(stream) => {
-                while let Some((length, frame)) = stream.peek_frame(true) {
+                let addr = stream.addr;
+                let ts = stream.read_ts().unwrap_or(0);
+                while let Some((length, frame)) = stream.read_frame() {
                     match parse_pg_message(frame.tag, &frame.payload[frame.offset..]) {
                         Ok(msg) => {
-                            writeln!(writer, "[{}] ({}) -> {}", frame.addr, frame.ts, msg);
+                            writeln!(writer, "[{}] ({}) -> {}", addr, ts, msg)?;
                         }
                         Err(e) => {
                             error!("Failed to parse message: {e}");

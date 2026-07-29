@@ -22,7 +22,7 @@ struct PacketInfo<'a> {
 pub struct CaptureReader<'a> {
     pcap: Box<dyn PcapReaderIterator + Send + 'a>,
     port: u16,
-    streams: HashMap<SocketAddr, PqStream>,
+    pub streams: HashMap<SocketAddr, PqStream>,
     pub packets_read: usize,
     pub bytes_read: usize,
 }
@@ -51,7 +51,9 @@ impl<'a> CaptureReader<'a> {
                 Ok((consumed, block)) => {
                     self.bytes_read += consumed;
                     if let Some(info) = process_block(block, self.port) {
-                        self.packets_read += 1;
+                        if !info.tcp.payload().is_empty() {
+                            self.packets_read += 1;
+                        }
                         let stream = process_packet(info, &mut self.streams);
                         self.pcap.consume_noshift(consumed);
                         return ReadState::Ok(stream);
@@ -83,7 +85,6 @@ fn process_packet<'a, 'b>(
     let stream = buffers
         .entry(client)
         .or_insert_with(|| PqStream::new(client));
-    stream.set_ts(info.ts);
 
     let effective_seq = if tcp.syn() {
         stream.set_isn(seq);
@@ -92,9 +93,8 @@ fn process_packet<'a, 'b>(
     } else {
         seq
     };
-    if !tcp_payload.is_empty() {
-        stream.ingest(effective_seq, tcp_payload);
-    }
+    stream.ingest(effective_seq, tcp_payload, info.ts);
+    stream.sync(true);
     return stream;
 }
 
