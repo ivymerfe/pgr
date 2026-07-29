@@ -110,7 +110,7 @@ enum Commands {
         client_map: PathBuf,
 
         #[arg(
-            long = "p2", 
+            long = "p1", 
             default_value_t = 5432, 
             value_parser = clap::value_parser!(u16).range(1..)
         )]
@@ -134,6 +134,17 @@ async fn main()-> Result<(), Box<dyn Error>> {
     let timer = OffsetTime::new(local_offset, format);
     tracing_subscriber::fmt().with_timer(timer).init();
 
+    match run_command(cli).await {
+        Ok(()) => (),
+        Err(e) => {
+            error!("{}", e.to_string());
+        }
+    }
+
+    Ok(())
+}
+
+async fn run_command(cli: Cli) -> Result<(), Box<dyn Error>> {
     match cli.command {
         Commands::Replay { input, cap_port, client_map, host, port, dbname, user, pass } => {
             let mut input_path = path::absolute(&input)?;
@@ -188,12 +199,11 @@ async fn main()-> Result<(), Box<dyn Error>> {
                 error!("Translations file does not exist: {}", map_path.display());
                 return Ok(());
             }
-            info!("Compare {}[{port1}] <=> {}[{port2}] via {}",
-                c1_path.display(), c2_path.display(), map_path.display());
+            info!("Compare {}[{port1}] <=> {}[{port2}]", c1_path.display(), c2_path.display());
+            info!("Map file: {}", map_path.display());
             let mut state = CompareState::new();
             state.load_map(&map_path)?;
             state.compare(c1, c2, port1, port2)?;
-            println!("{state}");
         }
     }
     Ok(())

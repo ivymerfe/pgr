@@ -46,18 +46,10 @@ impl PqStream {
         }
     }
 
-    fn compact_if_needed(&mut self) {
-        if self.head > 65_536 && self.head >= self.buf.len() / 2 {
-            self.buf.drain(0..self.head);
-            self.head = 0;
-        }
-    }
-
     pub fn ingest(&mut self, seq: u32, payload: &[u8]) {
         if payload.is_empty() {
             return;
         }
-        self.compact_if_needed();
 
         let next = match self.next_seq {
             None => {
@@ -138,8 +130,16 @@ impl PqStream {
         return Some((frame_length, frame));
     }
 
+    fn compact_if_needed(&mut self) {
+        if self.head > 65_536 && self.head >= self.buf.len() / 2 {
+            self.buf.drain(0..self.head);
+            self.head = 0;
+        }
+    }
+
     pub fn consume(&mut self, length: usize) {
         self.head += length;
+        self.compact_if_needed();
     }
 
     fn resync(&self, is_frontend: bool) -> usize {

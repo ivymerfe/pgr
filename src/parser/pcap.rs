@@ -22,7 +22,9 @@ struct PacketInfo<'a> {
 pub struct CaptureReader<'a> {
     pcap: Box<dyn PcapReaderIterator + Send + 'a>,
     port: u16,
-    c2s_buffers: HashMap<SocketAddr, PqStream>,
+    streams: HashMap<SocketAddr, PqStream>,
+    pub packets_read: usize,
+    pub bytes_read: usize,
 }
 
 impl<'a> CaptureReader<'a> {
@@ -33,20 +35,28 @@ impl<'a> CaptureReader<'a> {
         Ok(Self {
             pcap: create_reader(131072, reader)?,
             port,
-            c2s_buffers: HashMap::new(),
+            streams: HashMap::new(),
+            packets_read: 0,
+            bytes_read: 0,
         })
+    }
+
+    pub fn get_stream(&mut self, addr: &SocketAddr) -> Option<&mut PqStream> {
+        return self.streams.get_mut(addr);
     }
 
     pub fn next(&mut self) -> ReadState<'_> {
         loop {
             match self.pcap.next() {
                 Ok((consumed, block)) => {
+                    self.bytes_read += consumed;
                     if let Some(info) = process_block(block, self.port) {
-                        let stream = process_packet(info, &mut self.c2s_buffers);
-                        self.pcap.consume(consumed);
+                        self.packets_read += 1;
+                        let stream = process_packet(info, &mut self.streams);
+                        self.pcap.consume_noshift(consumed);
                         return ReadState::Ok(stream);
                     }
-                    self.pcap.consume(consumed);
+                    self.pcap.consume_noshift(consumed);
                 }
                 Err(PcapError::Eof) => {
                     return ReadState::Eof;
