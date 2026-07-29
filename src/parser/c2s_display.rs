@@ -80,7 +80,7 @@ impl<'a> fmt::Display for PgC2S<'a> {
                     name, query, parameter_type_oids
                 )
             }
-            PgC2S::PasswordMessage(p) => write!(f, "PasswordMessage('{p}')"), // Sanitized for logging
+            PgC2S::PasswordMessage(p) => write!(f, "PasswordMessage('{p}')"),
             PgC2S::Query(query) => write!(f, "Query('{}')", query),
             PgC2S::Sync => write!(f, "Sync"),
             PgC2S::Terminate => write!(f, "Terminate"),

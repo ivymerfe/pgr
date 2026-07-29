@@ -1,32 +1,35 @@
-use bytes::{Buf, Bytes, BytesMut};
 use std::{collections::BTreeMap, net::SocketAddr};
 
-#[derive(Debug)]
+use tracing::warn;
+
 pub struct PqStream {
-    staging: BytesMut,
+    buf: Vec<u8>,
+    head: usize,
     next_seq: Option<u32>,
-    unordered_chunks: BTreeMap<u32, Bytes>,
+    reorder: BTreeMap<u32, Vec<u8>>,
     pub addr: SocketAddr,
-    last_ts: u64,
-    frame_ts: Option<u64>,
+    frame_ts: u64,
+    update_ts: bool,
 }
 
-#[derive(Debug, Clone)]
-pub struct PqFrame {
+pub struct PqFrame<'a> {
+    pub addr: SocketAddr,
     pub ts: u64,
     pub tag: u8,
-    pub payload: Bytes,
+    pub offset: usize,
+    pub payload: &'a [u8],
 }
 
 impl PqStream {
     pub fn new(addr: SocketAddr) -> Self {
         Self {
-            staging: BytesMut::new(),
+            buf: Vec::new(),
+            head: 0,
             next_seq: None,
-            unordered_chunks: BTreeMap::new(),
+            reorder: BTreeMap::new(),
             addr,
-            last_ts: 0,
-            frame_ts: None,
+            frame_ts: 0,
+            update_ts: true,
         }
     }
 
@@ -37,10 +40,25 @@ impl PqStream {
     }
 
     pub fn set_ts(&mut self, ts: u64) {
-        self.last_ts = ts;
+        if self.update_ts {
+            self.frame_ts = ts;
+            self.update_ts = false;
+        }
+    }
+
+    fn compact_if_needed(&mut self) {
+        if self.head > 65_536 && self.head >= self.buf.len() / 2 {
+            self.buf.drain(0..self.head);
+            self.head = 0;
+        }
     }
 
     pub fn ingest(&mut self, seq: u32, payload: &[u8]) {
+        if payload.is_empty() {
+            return;
+        }
+        self.compact_if_needed();
+
         let next = match self.next_seq {
             None => {
                 self.next_seq = Some(seq);
@@ -52,125 +70,101 @@ impl PqStream {
         let delta = seq.wrapping_sub(next) as i32;
 
         if delta == 0 {
-            // 1. In-order arrival: Extend staging buffer directly
-            self.staging.extend_from_slice(payload);
-            let mut current_next = next.wrapping_add(payload.len() as u32);
-
-            // Drain any pending out-of-order chunks that connect to current_next
-            self.drain_matching_chunks(&mut current_next);
-            self.next_seq = Some(current_next);
+            self.buf.extend_from_slice(payload);
+            let mut new_next = next.wrapping_add(payload.len() as u32);
+            while let Some(pending) = self.reorder.remove(&new_next) {
+                new_next = new_next.wrapping_add(pending.len() as u32);
+                self.buf.extend_from_slice(&pending);
+            }
+            self.next_seq = Some(new_next);
         } else if delta < 0 {
-            // 2. Old/Overlapping packet: Trim overlap and re-ingest
             let overlap = (-delta) as usize;
             if overlap < payload.len() {
                 self.ingest(next, &payload[overlap..]);
             }
         } else {
-            self.unordered_chunks
-                .entry(seq)
-                .or_insert_with(|| Bytes::copy_from_slice(payload));
-        }
-    }
-
-    fn drain_matching_chunks(&mut self, current_next: &mut u32) {
-        while let Some(entry) = self.unordered_chunks.first_entry() {
-            let chunk_seq = *entry.key();
-            let delta = chunk_seq.wrapping_sub(*current_next) as i32;
-
-            if delta <= 0 {
-                let chunk = entry.remove();
-                let overlap = (-delta) as usize;
-
-                if overlap < chunk.len() {
-                    let valid_slice = &chunk[overlap..];
-                    self.staging.extend_from_slice(valid_slice);
-                    *current_next = current_next.wrapping_add(valid_slice.len() as u32);
-                }
-            } else {
-                // Next required sequence isn't in tree yet; gap still exists
-                break;
-            }
+            self.reorder.insert(seq, payload.to_vec());
         }
     }
 
     pub fn len(&self) -> usize {
-        self.staging.len()
+        self.buf.len().saturating_sub(self.head)
     }
 
-    pub fn pop_frame(&mut self) -> Result<Option<PqFrame>, &'static str> {
-        let ts = self.frame_ts.take().unwrap_or(self.last_ts);
-
+    pub fn peek_frame(&mut self, is_frontend: bool) -> Option<(usize, PqFrame<'_>)> {
         if self.len() < 4 {
-            return Ok(None);
+            return None;
         }
+        let buf = &self.buf[self.head..];
 
-        let (tag, frame_offset, frame_length) = if self.staging[0] == 0x00 {
-            let length = u32::from_be_bytes([
-                self.staging[0],
-                self.staging[1],
-                self.staging[2],
-                self.staging[3],
-            ]) as usize;
+        let (tag, frame_offset, frame_length) = if buf[0] == 0x00 {
+            // 1. Headerless messages (SSLRequest, StartupMessage, CancelRequest)
+            let length = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
             if !(8..=10_000_000).contains(&length) {
-                return Err("Invalid headerless packet length");
+                self.head += 4;
+                self.head = self.resync(is_frontend);
+                return self.peek_frame(is_frontend);
             }
-            if self.len() < length {
-                return Ok(None);
+            if buf.len() < length {
+                return None;
             }
             (0, 4, length)
         } else {
-            if self.len() < 5 {
-                return Ok(None);
+            // 2. [Tag: 1 byte][Length: 4 bytes][Payload: Length - 4]
+            if buf.len() < 5 {
+                return None;
             }
-            let payload_len = u32::from_be_bytes([
-                self.staging[1],
-                self.staging[2],
-                self.staging[3],
-                self.staging[4],
-            ]) as usize;
-            if !(4..=10_000_000).contains(&payload_len) {
-                return Err("Invalid tagged payload length");
+            let length = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
+            if !(4..=10_000_000).contains(&length) {
+                self.head += 5;
+                self.head = self.resync(is_frontend);
+                return self.peek_frame(is_frontend);
             }
-            let total_frame_len = 1 + payload_len;
-            if self.len() < total_frame_len {
-                return Ok(None);
+            let frame_length = 1 + length;
+            if buf.len() < frame_length {
+                return None;
             }
-            (self.staging[0], 5, total_frame_len)
+            (buf[0], 5, frame_length)
         };
-        let mut frame_bytes = self.staging.split_to(frame_length).freeze();
-        frame_bytes.advance(frame_offset);
-
-        self.frame_ts = Some(ts);
-        Ok(Some(PqFrame {
-            ts,
+        let buf = &self.buf[self.head..self.head + frame_length];
+        self.update_ts = true;
+        let frame = PqFrame {
+            addr: self.addr,
+            ts: self.frame_ts,
             tag,
-            payload: frame_bytes,
-        }))
+            offset: frame_offset,
+            payload: buf,
+        };
+        return Some((frame_length, frame));
     }
 
-    /// Advance staging byte-by-byte until a valid frame signature is found.
-    pub fn resync(&mut self, is_frontend: bool) {
+    pub fn consume(&mut self, length: usize) {
+        self.head += length;
+    }
+
+    fn resync(&self, is_frontend: bool) -> usize {
+        warn!("[{}] corrupted stream: resync", self.addr);
+
         let valid_tags: &[u8] = if is_frontend {
             b"QPBDECfcpSHX"
         } else {
             b"RKZCS123nsITtDEAN"
         };
-
-        let mut drop_bytes = 0;
-        while self.staging.len() - drop_bytes >= 5 {
-            let slice = &self.staging[drop_bytes..];
-            let tag = slice[0];
-            let len = u32::from_be_bytes([slice[1], slice[2], slice[3], slice[4]]) as usize;
+        let mut offset = self.head;
+        while offset <= self.buf.len() {
+            let tag = self.buf[self.head];
+            let len = u32::from_be_bytes([
+                self.buf[self.head + 1],
+                self.buf[self.head + 2],
+                self.buf[self.head + 3],
+                self.buf[self.head + 4],
+            ]) as usize;
 
             if valid_tags.contains(&tag) && (4..=10_000_000).contains(&len) {
-                break;
+                return offset;
             }
-
-            drop_bytes += 1;
+            offset += 1;
         }
-
-        if drop_bytes > 0 {
-            self.staging.advance(drop_bytes);
-        }
+        return offset;
     }
 }
