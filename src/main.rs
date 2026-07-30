@@ -8,7 +8,7 @@ use std::error::Error;
 use tracing::{error, info};
 
 use crate::compare::CompareState;
-use crate::replay::client::ReplayClient;
+use crate::replay::client::ReplayManager;
 
 mod parser;
 mod dump;
@@ -156,8 +156,8 @@ async fn run_command(cli: Cli) -> Result<(), Box<dyn Error>> {
             let map_path = path::absolute(&client_map)?;
             info!("Replaying {}[port={cap_port},map={}] at host={host} port={port} user={user}",
                 map_path.display(), input_path.display());
-            let mut client = ReplayClient::new(map_path, host, port, dbname, user, pass).await?;
-            client.replay(input_path, cap_port).await?;
+            let mut mgr = ReplayManager::new(map_path, host, port, dbname, user, pass).await?;
+            mgr.replay(input_path, cap_port).await?;
         }
         Commands::Dump { input, output, cap_port } => {
             let mut input_path = path::absolute(&input)?;

@@ -1,104 +1,68 @@
-use crate::parser::pq_stream::PqStream;
-
 use etherparse::{InternetSlice, SlicedPacket, TcpSlice, TransportSlice};
 use pcap_parser::{traits::PcapReaderIterator, *};
-use std::collections::HashMap;
-use std::io::Read;
-use std::net::SocketAddr;
+use std::{io::Read, net::SocketAddr};
 
 pub enum ReadState<'a> {
-    Ok(&'a mut PqStream),
+    Ok(TsPacket<'a>),
+    Continue,
     Eof,
     RefillFail(String),
     ReadFail(String),
 }
 
-struct PacketInfo<'a> {
-    addr: SocketAddr,
-    ts: u64,
-    tcp: TcpSlice<'a>,
+pub struct TsPacket<'a> {
+    pub addr: SocketAddr,
+    pub ts: u64,
+    pub tcp: TcpSlice<'a>,
 }
 
 pub struct CaptureReader<'a> {
     pcap: Box<dyn PcapReaderIterator + Send + 'a>,
-    port: u16,
-    pub streams: HashMap<SocketAddr, PqStream>,
-    pub packets_read: usize,
+    consume: usize,
+    refill: bool,
     pub bytes_read: usize,
 }
 
 impl<'a> CaptureReader<'a> {
-    pub fn new<R: Read + Send + 'a>(
-        reader: R,
-        port: u16,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new<R: Read + Send + 'a>(reader: R) -> Result<Self, Box<dyn std::error::Error>> {
         Ok(Self {
             pcap: create_reader(131072, reader)?,
-            port,
-            streams: HashMap::new(),
-            packets_read: 0,
+            consume: 0,
+            refill: false,
             bytes_read: 0,
         })
     }
 
-    pub fn get_stream(&mut self, addr: &SocketAddr) -> Option<&mut PqStream> {
-        return self.streams.get_mut(addr);
-    }
-
     pub fn next(&mut self) -> ReadState<'_> {
-        loop {
-            match self.pcap.next() {
-                Ok((consumed, block)) => {
-                    self.bytes_read += consumed;
-                    if let Some(info) = process_block(block, self.port) {
-                        if !info.tcp.payload().is_empty() {
-                            self.packets_read += 1;
-                        }
-                        let stream = process_packet(info, &mut self.streams);
-                        self.pcap.consume_noshift(consumed);
-                        return ReadState::Ok(stream);
-                    }
-                    self.pcap.consume_noshift(consumed);
-                }
-                Err(PcapError::Eof) => {
-                    return ReadState::Eof;
-                }
-                Err(PcapError::Incomplete(_sz)) => {
-                    if let Err(e) = self.pcap.refill() {
-                        return ReadState::RefillFail(e.to_string());
-                    }
-                }
-                Err(e) => return ReadState::ReadFail(e.to_string()),
-            };
+        if self.consume > 0 {
+            self.pcap.consume_noshift(self.consume);
+            self.consume = 0;
         }
+        if self.refill {
+            if let Err(e) = self.pcap.refill() {
+                return ReadState::RefillFail(e.to_string());
+            }
+            self.refill = false;
+        }
+        match self.pcap.next() {
+            Ok((consumed, block)) => {
+                self.bytes_read += consumed;
+                self.consume += consumed;
+                if let Some(packet) = process_block(block) {
+                    return ReadState::Ok(packet);
+                }
+            }
+            Err(PcapError::Eof) => return ReadState::Eof,
+            Err(PcapError::Incomplete(_sz)) => {
+                self.refill = true;
+            }
+            Err(e) => return ReadState::ReadFail(e.to_string()),
+        }
+        return ReadState::Continue;
     }
 }
 
-fn process_packet<'a, 'b>(
-    info: PacketInfo<'b>,
-    buffers: &'a mut HashMap<SocketAddr, PqStream>,
-) -> &'a mut PqStream {
-    let client = info.addr;
-    let tcp = info.tcp;
-    let seq = tcp.sequence_number();
-    let tcp_payload = tcp.payload();
-    let stream = buffers
-        .entry(client)
-        .or_insert_with(|| PqStream::new(client));
-
-    let effective_seq = if tcp.syn() {
-        stream.set_isn(seq);
-        // RFC 793
-        seq.wrapping_add(1)
-    } else {
-        seq
-    };
-    stream.ingest(effective_seq, tcp_payload, info.ts);
-    stream.sync(true);
-    return stream;
-}
-
-fn process_block(block: PcapBlockOwned, port: u16) -> Option<PacketInfo> {
+pub fn process_block(block: PcapBlockOwned) -> Option<TsPacket> {
     let (packet_data, ts) = match block {
         PcapBlockOwned::Legacy(p) => {
             let ts = (p.ts_sec as u64) * 1_000_000 + (p.ts_usec as u64);
@@ -115,13 +79,15 @@ fn process_block(block: PcapBlockOwned, port: u16) -> Option<PacketInfo> {
     };
     if !packet_data.is_empty() {
         if let Some(packet) = parse_packet(&packet_data) {
-            return filter_packet(packet, ts, port);
+            if let Some((addr, tcp)) = filter_packet(packet) {
+                return Some(TsPacket { addr, ts, tcp });
+            }
         }
     }
     return None;
 }
 
-fn filter_packet(packet: SlicedPacket<'_>, ts: u64, tcp_port: u16) -> Option<PacketInfo<'_>> {
+fn filter_packet(packet: SlicedPacket) -> Option<(SocketAddr, TcpSlice)> {
     let src_ip = match &packet.net {
         Some(InternetSlice::Ipv4(ipv4)) => std::net::IpAddr::V4(ipv4.header().source_addr()),
         Some(InternetSlice::Ipv6(ipv6)) => std::net::IpAddr::V6(ipv6.header().source_addr()),
@@ -129,17 +95,13 @@ fn filter_packet(packet: SlicedPacket<'_>, ts: u64, tcp_port: u16) -> Option<Pac
     };
     if let Some(TransportSlice::Tcp(tcp)) = packet.transport {
         let src_port = tcp.source_port();
-        let dst_port = tcp.destination_port();
-        if dst_port != tcp_port {
-            return None;
-        }
         let addr = SocketAddr::new(src_ip, src_port);
-        return Some(PacketInfo { addr, ts, tcp });
+        return Some((addr, tcp));
     }
     None
 }
 
-fn parse_packet<'a>(packet_data: &'a [u8]) -> Option<SlicedPacket<'a>> {
+fn parse_packet(packet_data: &'_ [u8]) -> Option<SlicedPacket<'_>> {
     if packet_data.len() > 20 {
         let protocol = u16::from_be_bytes([packet_data[0], packet_data[1]]);
         // 0x86DD = IPv6, 0x0800 = IPv4

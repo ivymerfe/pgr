@@ -7,28 +7,53 @@ use std::{
     time::Duration,
 };
 
-use pgwire::api::client::Config;
-use tokio::{sync::mpsc, task::JoinSet};
-use tokio_stream::StreamExt;
-use tracing::{error, info};
+use tokio::{
+    sync::{Mutex, mpsc},
+    task::JoinSet,
+};
+use tracing::{error, info, warn};
 
 use crate::{
-    parser::pcap::{CaptureReader, ReadState},
+    parser::{
+        pcap::{CaptureReader, ReadState},
+        pq_stream::PqStream,
+    },
     replay::{
-        addr_map::AddrMap, frame_tags::should_replay_frame, socket::ReplaySocket,
-        stats::ReplayStats, wait::WaitInfo,
+        addr_map::AddrMap,
+        frame_tags::should_replay_frame,
+        socket::{Config, ReplayConnection, ReplayError},
+        stats::ReplayStats,
+        wait::WaitInfo,
     },
 };
 
-pub struct ReplayClient {
-    addr_map: AddrMap,
-    config: Arc<Config>,
-    wait_info: WaitInfo,
-    channels: HashMap<SocketAddr, mpsc::UnboundedSender<Vec<u8>>>,
+struct ClientMessage {
+    ts: u64,
+    buf: Vec<u8>,
+}
+
+#[derive(Clone)]
+struct ClientInfo {
+    server_addr: SocketAddr,
+    config: Config,
+    addr_map: Arc<Mutex<AddrMap>>,
     stats: Arc<ReplayStats>,
 }
 
-impl ReplayClient {
+#[derive(Default)]
+struct ReplayClient {
+    stream: PqStream,
+    chan: Option<mpsc::UnboundedSender<ClientMessage>>,
+    dead: bool,
+    connected: bool,
+}
+
+pub struct ReplayManager {
+    info: ClientInfo,
+    clients: HashMap<SocketAddr, ReplayClient>,
+}
+
+impl ReplayManager {
     pub async fn new<P: AsRef<Path>>(
         addr_map_path: P,
         host: String,
@@ -37,25 +62,23 @@ impl ReplayClient {
         user: String,
         password: Option<String>,
     ) -> Result<Self, Box<dyn Error>> {
-        let addr_map = AddrMap::new(addr_map_path).await?;
-
         let addr: IpAddr = host.parse()?;
-        let mut config = Config::new();
-        config.hostaddr(addr);
-        config.port(port);
-        config.dbname(dbname);
-        config.user(user);
-        if password.is_some() {
-            config.password(password.unwrap());
-        }
-        config.application_name("pgr");
-
-        Ok(Self {
-            addr_map,
-            config: Arc::new(config),
-            wait_info: WaitInfo::new(),
-            channels: HashMap::new(),
+        let addr_map = AddrMap::new(addr_map_path).await?;
+        let config = Config {
+            user: user,
+            password: password.map(|s| s.as_bytes().to_vec()),
+            dbname: dbname,
+            application_name: "pgr".to_string(),
+        };
+        let info = ClientInfo {
+            server_addr: SocketAddr::new(addr, port),
+            config: config,
+            addr_map: Arc::new(Mutex::new(addr_map)),
             stats: Arc::new(ReplayStats::new()),
+        };
+        Ok(Self {
+            info,
+            clients: HashMap::new(),
         })
     }
 
@@ -64,45 +87,40 @@ impl ReplayClient {
         input_path: std::path::PathBuf,
         cap_port: u16,
     ) -> Result<(), Box<dyn Error>> {
-        let stats = self.stats.clone();
-
+        let stats = self.info.stats.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(1));
             interval.tick().await;
 
             loop {
                 interval.tick().await;
-                let rps = stats.read_pps();
-                info!("PPS: {rps}");
+                let total = stats.read_total_sent();
+                let pps = stats.read_delta_sent();
+                let recv = stats.read_delta_recv();
+                info!("Total sent: {total} Delta sent: {pps} Delta recv: {recv}");
             }
         });
 
-        let input_file = std::fs::File::open(input_path)?;
-        let reader = std::io::BufReader::with_capacity(131072, input_file);
-        let mut capture_reader = CaptureReader::new(reader, cap_port)?;
+        let mut capture_reader = CaptureReader::new(std::fs::File::open(input_path)?)?;
 
-        self.wait_info.reset();
+        let mut wait = WaitInfo::new();
         let mut tasks = JoinSet::new();
         loop {
             match capture_reader.next() {
-                ReadState::Ok(stream) => {
-                    while let Some((length, frame)) = stream.read_frame() {
-                        if should_replay_frame(frame.tag) {
-                            break;
-                        } else {
-                            stream.consume(length);
-                        }
+                ReadState::Ok(packet) => {
+                    if packet.tcp.destination_port() != cap_port {
+                        continue;
                     }
-                    if stream.len() > 5 && should_replay_frame(stream.read_tag()) {
-                        if let Some(ts) = stream.take_ts()
-                            && let Some(packet) = stream.read_packet()
-                        {
-                            self.wait_info.pcap_ts(ts);
-                            self.send_buf(stream.addr, packet.to_vec(), ts, &mut tasks)
-                                .await?;
+                    wait.pcap_ts(packet.ts);
+                    if let Some(client) =
+                        self.ensure_client(packet.addr, packet.ts, &mut tasks, &wait)
+                    {
+                        if client.stream.process_packet(packet.tcp) {
+                            Self::update_client(client, packet.addr, packet.ts);
                         }
                     }
                 }
+                ReadState::Continue => (),
                 ReadState::Eof => break,
                 ReadState::ReadFail(e) => {
                     error!("Failed to read pcap: {e}");
@@ -114,68 +132,129 @@ impl ReplayClient {
                 }
             }
         }
+        self.clients.clear();
         tasks.join_all().await;
         Ok(())
     }
 
-    async fn send_buf(
+    fn ensure_client(
         &mut self,
         pcap_addr: SocketAddr,
-        buf: Vec<u8>,
-        ts: u64,
+        start_ts: u64,
         tasks: &mut JoinSet<()>,
-    ) -> Result<(), Box<dyn Error>> {
-        if !self.channels.contains_key(&pcap_addr) {
-            info!("Connecting: {pcap_addr}");
-            let socket = connect(self.config.clone()).await?;
-            let local_addr = socket.addr;
-            self.addr_map.write(pcap_addr, local_addr).await?;
+        wait: &WaitInfo,
+    ) -> Option<&mut ReplayClient> {
+        let client = self.clients.entry(pcap_addr).or_default();
+        if client.dead {
+            return None;
+        }
+        if !client.connected {
+            let (tx, rx) = mpsc::unbounded_channel();
+            client.chan = Some(tx);
+            tasks.spawn(client_proc(
+                pcap_addr,
+                self.info.clone(),
+                wait.clone(),
+                start_ts,
+                rx,
+            ));
+            client.connected = true;
+        }
+        return Some(client);
+    }
 
-            let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
-            self.channels.insert(pcap_addr, tx);
-            tasks.spawn(client_proc(socket, rx));
+    fn update_client(client: &mut ReplayClient, pcap_addr: SocketAddr, ts: u64) {
+        let stream = &mut client.stream;
+        let skip = stream.find_frame(true);
+        if skip > 0 {
+            warn!("[{}] Corrupted stream, resync", pcap_addr);
+            stream.consume(skip);
         }
-        if let Some(chan) = self.channels.get_mut(&pcap_addr) {
-            self.wait_info.until(ts).await;
-            if let Err(e) = chan.send(buf) {
-                error!("Failed to send packet to channel: {e}");
-                self.channels.remove(&pcap_addr);
+        while let Some((length, frame)) = stream.read_frame() {
+            if should_replay_frame(frame.tag) {
+                break;
+            } else {
+                stream.consume(length);
             }
-            self.stats.count_packet();
         }
-        return Ok(());
+        if let Some(packet) = stream.read_packet() {
+            if !should_replay_frame(packet[0]) {
+                return;
+            }
+            if let Some(chan) = &client.chan {
+                let msg = ClientMessage {
+                    ts,
+                    buf: packet.to_vec(),
+                };
+                match chan.send(msg) {
+                    Ok(()) => {}
+                    Err(_e) => {
+                        info!("Removed client");
+                        client.dead = true;
+                    }
+                }
+            }
+        }
     }
 }
 
-async fn connect(config: Arc<Config>) -> Result<ReplaySocket, Box<dyn Error>> {
-    let addr = *config.get_hostaddrs().first().expect("no hostaddr");
-    let port = *config.get_ports().first().expect("no port");
-    let socket_addr = SocketAddr::new(addr, port);
-    ReplaySocket::connect(socket_addr, config).await
-}
+async fn client_proc(
+    me: SocketAddr,
+    info: ClientInfo,
+    wait: WaitInfo,
+    start_ts: u64,
+    mut rx: mpsc::UnboundedReceiver<ClientMessage>,
+) {
+    wait.until(start_ts).await;
 
-async fn client_proc(mut socket: ReplaySocket, mut rx: mpsc::UnboundedReceiver<Vec<u8>>) {
+    info!("[{me}] Connecting");
+    let mut socket = match ReplayConnection::connect(info.server_addr, info.config.clone()).await {
+        Ok(s) => s,
+        Err(e) => {
+            error!("[{me}] Connection failed: {e}");
+            return;
+        }
+    };
+    let local_addr = socket.addr;
+    info!("[{me}] Connected: {local_addr}");
+
+    let mut addr_map = info.addr_map.lock().await;
+    match addr_map.write(me, local_addr).await {
+        Ok(()) => (),
+        Err(e) => {
+            error!("[{me}] Failed to write addr: {e}");
+        }
+    }
+    drop(addr_map);
+
     loop {
         tokio::select! {
             result = rx.recv() => {
                 match result {
-                    Some(packet) => {
-                        if let Err(e) = socket.send_packet(&packet).await {
-                            error!("[{}] send failed: {e}", socket.addr);
+                    Some(msg) => {
+                        wait.until(msg.ts).await;
+                        if let Err(e) = socket.send_packet(&msg.buf).await {
+                            error!("[{me}] send failed: {e}");
                             break;
                         }
+                        info.stats.log_send();
                     }
                     None => break,
                 }
             }
-            result = socket.next() => {
+            result = socket.read_dont_care() => {
                 match result {
-                    Some(Ok(_backend_msg)) => {}
-                    Some(Err(e)) => {
-                        error!("[{}] recv failed: {e}", socket.addr);
+                    Ok(sz) => {
+                        info.stats.log_recv(sz);
+                    }
+                    Err(ReplayError::ConnectionClosed) => {
+                        info!("[{me}] Disconnected");
                         break;
                     }
-                    None => break,
+                    Err(e) => {
+                        error!("[{me}] recv failed: {e}");
+                        break;
+                    }
                 }
             }
         }

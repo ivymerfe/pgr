@@ -11,22 +11,31 @@ use crate::parser::pcap::{CaptureReader, ReadState};
 use crate::parser::pq_stream::{PqFrame, PqStream};
 use crate::replay::frame_tags::should_replay_frame;
 
+struct Client {
+    c1_addr: SocketAddr,
+    c2_addr: SocketAddr,
+    c1_stream: PqStream,
+    c2_stream: PqStream,
+    c1_timings: Vec<u64>,
+    c2_timings: Vec<u64>,
+}
+
 pub struct CompareState {
-    s1_to_s2: HashMap<SocketAddr, SocketAddr>,
-    s2_to_s1: HashMap<SocketAddr, SocketAddr>,
-    s1_ignore: HashSet<SocketAddr>,
-    s2_ignore: HashSet<SocketAddr>,
-    packet_timings: HashMap<SocketAddr, TimingInfo>,
+    c1_to_c2: HashMap<SocketAddr, SocketAddr>,
+    c2_to_c1: HashMap<SocketAddr, SocketAddr>,
+    c1_ignore: HashSet<SocketAddr>,
+    c2_ignore: HashSet<SocketAddr>,
+    clients: HashMap<SocketAddr, Client>,
 }
 
 impl CompareState {
     pub fn new() -> Self {
         return Self {
-            s1_to_s2: HashMap::new(),
-            s2_to_s1: HashMap::new(),
-            s1_ignore: HashSet::new(),
-            s2_ignore: HashSet::new(),
-            packet_timings: HashMap::new(),
+            c1_to_c2: HashMap::new(),
+            c2_to_c1: HashMap::new(),
+            c1_ignore: HashSet::new(),
+            c2_ignore: HashSet::new(),
+            clients: HashMap::new(),
         };
     }
 
@@ -47,11 +56,36 @@ impl CompareState {
             let addr_1: SocketAddr = left_str.parse()?;
             let addr_2: SocketAddr = right_str.parse()?;
 
-            self.s1_to_s2.insert(addr_1, addr_2);
-            self.s2_to_s1.insert(addr_2, addr_1);
+            self.c1_to_c2.insert(addr_1, addr_2);
+            self.c2_to_c1.insert(addr_2, addr_1);
         }
 
         Ok(())
+    }
+
+    fn get_or_create_client(&mut self, c1_addr: SocketAddr, c2_addr: SocketAddr) -> &mut Client {
+        self.clients.entry(c1_addr).or_insert_with(|| Client {
+            c1_addr,
+            c2_addr,
+            c1_stream: PqStream::default(),
+            c2_stream: PqStream::default(),
+            c1_timings: Vec::new(),
+            c2_timings: Vec::new(),
+        })
+    }
+
+    fn find_c1(&mut self, c1_addr: SocketAddr) -> Option<&mut Client> {
+        if let Some(c2_addr) = self.c1_to_c2.get(&c1_addr) {
+            return Some(self.get_or_create_client(c1_addr, c2_addr.clone()));
+        }
+        return None;
+    }
+
+    fn find_c2(&mut self, c2_addr: SocketAddr) -> Option<&mut Client> {
+        if let Some(c1_addr) = self.c2_to_c1.get(&c2_addr) {
+            return Some(self.get_or_create_client(c1_addr.clone(), c2_addr));
+        }
+        return None;
     }
 
     pub fn compare<P: AsRef<Path>>(
@@ -66,32 +100,40 @@ impl CompareState {
         let meta1 = file1.metadata()?;
         let meta2 = file2.metadata()?;
 
-        let c1_buf_reader = BufReader::with_capacity(131072, file1);
-        let c2_buf_reader = BufReader::with_capacity(131072, file2);
-        let mut c1_reader = CaptureReader::new(c1_buf_reader, port1)?;
-        let mut c2_reader = CaptureReader::new(c2_buf_reader, port2)?;
+        let mut c1_reader = CaptureReader::new(file1)?;
+        let mut c2_reader = CaptureReader::new(file2)?;
+
+        let (mut c1_packets, mut c2_packets) = (0, 0);
         let (mut c1_eof, mut c2_eof) = (false, false);
         while !c1_eof || !c2_eof {
             if !c1_eof {
                 match c1_reader.next() {
-                    ReadState::Ok(stream) => {
-                        let addr = stream.addr;
-                        if self.s1_ignore.contains(&addr) {
+                    ReadState::Ok(packet) => {
+                        if packet.tcp.destination_port() != port1 {
                             continue;
                         }
-                        if let Some(pair_addr) = self.s1_to_s2.get(&addr) {
-                            if let Some(ts) = stream.take_ts() {
-                                let timings = self.packet_timings.entry(addr).or_default();
-                                timings.add_s1(ts);
-                            }
-                            if let Some(pair_stream) = c2_reader.get_stream(&pair_addr) {
-                                self.compare_streams(stream, pair_stream)?;
+                        c1_packets += 1;
+                        let addr = packet.addr;
+                        if self.c1_ignore.contains(&addr) {
+                            continue;
+                        }
+                        if let Some(client) = self.find_c1(addr) {
+                            let stream = &mut client.c1_stream;
+                            if stream.process_packet(packet.tcp) {
+                                let skip = stream.find_frame(true);
+                                if skip > 0 {
+                                    warn!("[{}] Corrupted stream, resync", packet.addr);
+                                    stream.consume(skip);
+                                }
+                                client.c1_timings.push(packet.ts);
+                                Self::check_client(client)?;
                             }
                         } else {
                             warn!("Cannot find pair s1->s2: {addr}");
-                            self.s1_ignore.insert(addr);
+                            self.c1_ignore.insert(addr);
                         }
                     }
+                    ReadState::Continue => (),
                     ReadState::Eof => {
                         c1_eof = true;
                     }
@@ -107,25 +149,32 @@ impl CompareState {
             }
             if !c2_eof {
                 match c2_reader.next() {
-                    ReadState::Ok(stream) => {
-                        let addr = stream.addr;
-                        if self.s2_ignore.contains(&addr) {
+                    ReadState::Ok(packet) => {
+                        if packet.tcp.destination_port() != port2 {
                             continue;
                         }
-                        if let Some(pair_addr) = self.s2_to_s1.get(&addr) {
-                            if let Some(ts) = stream.take_ts() {
-                                let timings =
-                                    self.packet_timings.entry(pair_addr.clone()).or_default();
-                                timings.add_s2(ts);
-                            }
-                            if let Some(pair_stream) = c1_reader.get_stream(&pair_addr) {
-                                self.compare_streams(pair_stream, stream)?;
+                        c2_packets += 1;
+                        let addr = packet.addr;
+                        if self.c2_ignore.contains(&addr) {
+                            continue;
+                        }
+                        if let Some(client) = self.find_c2(addr) {
+                            let stream = &mut client.c2_stream;
+                            if stream.process_packet(packet.tcp) {
+                                let skip = stream.find_frame(true);
+                                if skip > 0 {
+                                    warn!("[{}] Corrupted stream, resync", packet.addr);
+                                    stream.consume(skip);
+                                }
+                                client.c2_timings.push(packet.ts);
+                                Self::check_client(client)?;
                             }
                         } else {
                             warn!("Cannot find pair s2->s1: {addr}");
-                            self.s1_ignore.insert(addr);
+                            self.c2_ignore.insert(addr);
                         }
                     }
+                    ReadState::Continue => (),
                     ReadState::Eof => {
                         c2_eof = true;
                     }
@@ -142,13 +191,13 @@ impl CompareState {
         }
         info!(
             "C1: {} packets, {}/{} bytes",
-            c1_reader.packets_read,
+            c1_packets,
             c1_reader.bytes_read,
             meta1.len()
         );
         info!(
             "C2: {} packets, {}/{} bytes",
-            c2_reader.packets_read,
+            c2_packets,
             c2_reader.bytes_read,
             meta2.len()
         );
@@ -157,25 +206,23 @@ impl CompareState {
     }
 
     fn analyze_timings(&self) {
-        for (addr, timings) in &self.packet_timings {
-            if let Some(pair) = self.s1_to_s2.get(addr) {
-                let (avg, max) = timings.avg_max();
-                info!(
-                    "{addr}({}) <- {pair}({}): avg = {:.2}ms; max = {:.2}ms",
-                    timings.s1.len(),
-                    timings.s2.len(),
-                    avg / 1e3,
-                    max / 1e3
-                );
-            }
+        for c in self.clients.values() {
+            let (avg, max) = c.avg_max();
+            info!(
+                "{}({}) <- {}({}): avg = {:.2}ms; max = {:.2}ms",
+                c.c1_addr,
+                c.c1_timings.len(),
+                c.c2_addr,
+                c.c2_timings.len(),
+                avg / 1e3,
+                max / 1e3
+            );
         }
     }
 
-    fn compare_streams(
-        &mut self,
-        s1: &mut PqStream,
-        s2: &mut PqStream,
-    ) -> Result<(), CompareError> {
+    fn check_client(client: &mut Client) -> Result<(), CompareError> {
+        let s1 = &mut client.c1_stream;
+        let s2 = &mut client.c2_stream;
         loop {
             if let Some((consume1, frame1)) = s1.read_frame() {
                 if !should_replay_frame(frame1.tag) {
@@ -189,8 +236,8 @@ impl CompareState {
                     }
                     if frame1.payload != frame2.payload {
                         return Err(CompareError::MismatchedFrames {
-                            addr1: s1.addr,
-                            addr2: s2.addr,
+                            addr1: client.c1_addr,
+                            addr2: client.c2_addr,
                             off1: s1.offset(),
                             off2: s2.offset(),
                             info: format!("{}\n{}", frame1, frame2),
@@ -207,37 +254,27 @@ impl CompareState {
     }
 }
 
-#[derive(Default)]
-struct TimingInfo {
-    s1: Vec<u64>,
-    s2: Vec<u64>,
-}
-
-impl TimingInfo {
-    pub fn add_s1(&mut self, ts: u64) {
-        self.s1.push(ts);
-    }
-
-    pub fn add_s2(&mut self, ts: u64) {
-        self.s2.push(ts);
-    }
-
+impl Client {
     pub fn avg_max(&self) -> (f64, f64) {
-        let len = self.s1.len().min(self.s2.len());
+        let c1 = &self.c1_timings;
+        let c2 = &self.c2_timings;
+
+        let len = c1.len().min(c2.len());
         if len == 0 {
             return (0.0, 0.0);
         }
-        let base1 = self.s1[0];
-        let base2 = self.s2[0];
-        let (mut max, mut sum) = (0.0, 0.0);
+        let base1 = c1[0];
+        let base2 = c2[0];
+        let (mut max, mut sum) = (0.0f64, 0.0f64);
         for i in 1..len {
-            let rel_1 = (self.s1[i] - base1) as f64;
-            let rel_2 = (self.s2[i] - base2) as f64;
+            let rel_1 = (c1[i] - base1) as f64;
+            let rel_2 = (c2[i] - base2) as f64;
             let delta = rel_2 - rel_1;
-            if delta.abs() > max {
+            if delta.abs() > max.abs() {
+                info!("Delta {delta} at {i}");
                 max = delta;
             }
-            sum += delta;
+            sum += delta.abs();
         }
         return (sum / (len as f64), max);
     }

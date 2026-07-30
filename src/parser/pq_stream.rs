@@ -1,7 +1,7 @@
-use std::{collections::BTreeMap, net::SocketAddr};
+use etherparse::TcpSlice;
+use std::collections::BTreeMap;
 
-use tracing::warn;
-
+#[derive(Default)]
 pub struct PqStream {
     buf: Vec<u8>,
     head: usize,
@@ -9,8 +9,6 @@ pub struct PqStream {
     drained: usize,
     next_seq: Option<u32>,
     reorder: BTreeMap<u32, Vec<u8>>,
-    packet_ts: Option<u64>,
-    pub addr: SocketAddr,
 }
 
 pub struct PqFrame<'a> {
@@ -20,28 +18,27 @@ pub struct PqFrame<'a> {
 }
 
 impl PqStream {
-    pub fn new(addr: SocketAddr) -> Self {
-        Self {
-            buf: Vec::new(),
-            head: 0,
-            packet_head: 0,
-            drained: 0,
-            next_seq: None,
-            reorder: BTreeMap::new(),
-            addr,
-            packet_ts: None,
-        }
-    }
-
     pub fn set_isn(&mut self, syn_seq: u32) {
         if self.next_seq.is_none() {
             self.next_seq = Some(syn_seq.wrapping_add(1));
         }
     }
 
-    pub fn ingest(&mut self, seq: u32, payload: &[u8], ts: u64) {
+    pub fn process_packet(&mut self, tcp: TcpSlice) -> bool {
+        let seq = tcp.sequence_number();
+        let effective_seq = if tcp.syn() {
+            self.set_isn(seq);
+            // RFC 793
+            seq.wrapping_add(1)
+        } else {
+            seq
+        };
+        return self.ingest(effective_seq, tcp.payload());
+    }
+
+    pub fn ingest(&mut self, seq: u32, payload: &[u8]) -> bool {
         if payload.is_empty() {
-            return;
+            return false;
         }
         let next = match self.next_seq {
             None => {
@@ -54,9 +51,7 @@ impl PqStream {
         let delta = seq.wrapping_sub(next) as i32;
 
         if delta == 0 {
-            self.packet_ts = Some(ts);
             self.packet_head = self.buf.len();
-
             self.buf.extend_from_slice(payload);
 
             let mut new_next = next.wrapping_add(payload.len() as u32);
@@ -65,14 +60,16 @@ impl PqStream {
                 self.buf.extend_from_slice(&pending);
             }
             self.next_seq = Some(new_next);
+            return true;
         } else if delta < 0 {
             let overlap = (-delta) as usize;
             if overlap < payload.len() {
-                self.ingest(next, &payload[overlap..], ts);
+                return self.ingest(next, &payload[overlap..]);
             }
         } else {
             self.reorder.insert(seq, payload.to_vec());
         }
+        return false;
     }
 
     pub fn len(&self) -> usize {
@@ -83,24 +80,12 @@ impl PqStream {
         self.drained + self.head
     }
 
-    pub fn read_ts(&mut self) -> Option<u64> {
-        return self.packet_ts;
-    }
-
-    pub fn take_ts(&mut self) -> Option<u64> {
-        return self.packet_ts.take();
-    }
-
     pub fn read_packet(&self) -> Option<&[u8]> {
-        let head = self.head.max(self.packet_head);
-        if self.buf.len() - head < 5 {
+        if self.len() == 0 {
             return None;
         }
+        let head = self.head.max(self.packet_head);
         return Some(&self.buf[head..]);
-    }
-
-    pub fn read_tag(&self) -> u8 {
-        return self.buf[self.head];
     }
 
     pub fn read_frame(&self) -> Option<(usize, PqFrame<'_>)> {
@@ -143,21 +128,7 @@ impl PqStream {
         return Some((frame_length, frame));
     }
 
-    fn compact_if_needed(&mut self) {
-        if self.head > 65_536 && self.head >= self.buf.len() / 2 {
-            self.buf.drain(0..self.head);
-            self.head = 0;
-            self.packet_head = self.packet_head.saturating_sub(self.head);
-            self.drained += self.head;
-        }
-    }
-
-    pub fn consume(&mut self, length: usize) {
-        self.head += length;
-        self.compact_if_needed();
-    }
-
-    pub fn sync(&mut self, is_frontend: bool) {
+    pub fn find_frame(&self, is_frontend: bool) -> usize {
         let valid_tags: &[u8] = if is_frontend {
             b"QPBDECfcpSHX\0"
         } else {
@@ -178,9 +149,20 @@ impl PqStream {
             }
             offset += 1;
         }
-        if offset > self.head {
-            warn!("[{}] corrupted stream: resync", self.addr);
+        return offset - self.head;
+    }
+
+    fn compact_if_needed(&mut self) {
+        if self.head > 65_536 && self.head >= self.buf.len() / 2 {
+            self.buf.drain(0..self.head);
+            self.head = 0;
+            self.packet_head = self.packet_head.saturating_sub(self.head);
+            self.drained += self.head;
         }
-        self.head = offset;
+    }
+
+    pub fn consume(&mut self, length: usize) {
+        self.head += length;
+        self.compact_if_needed();
     }
 }

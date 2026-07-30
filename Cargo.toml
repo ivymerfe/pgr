@@ -4,15 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+bytes = "1.12.1"
 clap = { version = "4.6.4", features = ["derive"] }
 etherparse = "0.21.0"
-futures = "0.3.33"
+md5 = "0.8.1"
 pcap-parser = "0.17.0"
-pgwire = {version = "0.40.5", features = ["client-api"] }
-pin-project = "1.1.13"
 time = { version = "0.3.54", features = ["formatting", "macros", "local-offset"] }
 tokio = { version = "1.53.0", features = ["full"] }
-tokio-stream = "0.1.19"
-tokio-util = "0.7.19"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["fmt", "time"] }

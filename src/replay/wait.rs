@@ -1,5 +1,6 @@
 use std::time::Duration;
 use tokio::time::{Instant, sleep};
+use tracing::info;
 
 #[derive(Clone, Debug)]
 pub struct WaitInfo {
@@ -13,10 +14,6 @@ impl WaitInfo {
             start: Instant::now(),
             pcap_ts: None,
         }
-    }
-
-    pub fn reset(&mut self) {
-        self.start = Instant::now();
     }
 
     pub fn pcap_ts(&mut self, ts: u64) {
