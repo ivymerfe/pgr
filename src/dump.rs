@@ -36,7 +36,14 @@ pub fn dump(
                     while let Some((length, frame)) = stream.read_frame() {
                         match parse_pg_message(frame.tag, &frame.payload[frame.offset..]) {
                             Ok(msg) => {
-                                writeln!(writer, "[{}] ({}) -> {}", packet.addr, packet.ts, msg)?;
+                                writeln!(
+                                    writer,
+                                    "[{}]:{} ({}) -> {}",
+                                    packet.addr,
+                                    stream.packet_count(),
+                                    packet.ts,
+                                    msg
+                                )?;
                             }
                             Err(e) => {
                                 error!("Failed to parse message: {e}");

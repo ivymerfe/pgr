@@ -7,6 +7,7 @@ pub struct PqStream {
     head: usize,
     packet_head: usize,
     drained: usize,
+    packet_count: usize,
     next_seq: Option<u32>,
     reorder: BTreeMap<u32, Vec<u8>>,
 }
@@ -24,6 +25,32 @@ impl PqStream {
         }
     }
 
+    pub fn len(&self) -> usize {
+        self.buf.len().saturating_sub(self.head)
+    }
+
+    pub fn offset(&self) -> usize {
+        self.drained + self.head
+    }
+
+    pub fn packet_count(&self) -> usize {
+        self.packet_count
+    }
+
+    fn compact_if_needed(&mut self) {
+        if self.head > 65_536 && self.head >= self.buf.len() / 2 {
+            self.buf.drain(0..self.head);
+            self.head = 0;
+            self.packet_head = self.packet_head.saturating_sub(self.head);
+            self.drained += self.head;
+        }
+    }
+
+    pub fn consume(&mut self, length: usize) {
+        self.head += length;
+        self.compact_if_needed();
+    }
+
     pub fn process_packet(&mut self, tcp: TcpSlice) -> bool {
         let seq = tcp.sequence_number();
         let effective_seq = if tcp.syn() {
@@ -33,7 +60,11 @@ impl PqStream {
         } else {
             seq
         };
-        return self.ingest(effective_seq, tcp.payload());
+        if self.ingest(effective_seq, tcp.payload()) {
+            self.packet_count += 1;
+            return true;
+        }
+        return false;
     }
 
     pub fn ingest(&mut self, seq: u32, payload: &[u8]) -> bool {
@@ -70,14 +101,6 @@ impl PqStream {
             self.reorder.insert(seq, payload.to_vec());
         }
         return false;
-    }
-
-    pub fn len(&self) -> usize {
-        self.buf.len().saturating_sub(self.head)
-    }
-
-    pub fn offset(&self) -> usize {
-        self.drained + self.head
     }
 
     pub fn read_packet(&self) -> Option<&[u8]> {
@@ -150,19 +173,5 @@ impl PqStream {
             offset += 1;
         }
         return offset - self.head;
-    }
-
-    fn compact_if_needed(&mut self) {
-        if self.head > 65_536 && self.head >= self.buf.len() / 2 {
-            self.buf.drain(0..self.head);
-            self.head = 0;
-            self.packet_head = self.packet_head.saturating_sub(self.head);
-            self.drained += self.head;
-        }
-    }
-
-    pub fn consume(&mut self, length: usize) {
-        self.head += length;
-        self.compact_if_needed();
     }
 }

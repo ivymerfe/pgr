@@ -1,6 +1,6 @@
 use std::time::Duration;
 use tokio::time::{Instant, sleep};
-use tracing::info;
+use tracing::warn;
 
 #[derive(Clone, Debug)]
 pub struct WaitInfo {
@@ -33,6 +33,11 @@ impl WaitInfo {
             let wait_us = target_delta_us - elapsed_us;
 
             sleep(Duration::from_micros(wait_us)).await;
+        } else if elapsed_us - target_delta_us > 3000 {
+            warn!(
+                "Falling behind schedule by {}us",
+                elapsed_us - target_delta_us
+            );
         }
     }
 }

@@ -133,6 +133,7 @@ impl ReplayManager {
             }
         }
         self.clients.clear();
+        info!("Finished reading, waiting for clients");
         tasks.join_all().await;
         Ok(())
     }
