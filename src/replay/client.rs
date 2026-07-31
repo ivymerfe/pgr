@@ -16,11 +16,10 @@ use tracing::{error, info, warn};
 use crate::{
     parser::{
         pcap::{CaptureReader, ReadState},
-        pq_stream::PqStream,
+        pq_stream::{ConnState, FrameResult, PqStream},
     },
     replay::{
         addr_map::AddrMap,
-        frame_tags::should_replay_frame,
         socket::{Config, ReplayConnection, ReplayError},
         stats::ReplayStats,
         wait::WaitInfo,
@@ -43,6 +42,7 @@ struct ClientInfo {
 #[derive(Default)]
 struct ReplayClient {
     stream: PqStream,
+    sent_offset: usize,
     chan: Option<mpsc::UnboundedSender<ClientMessage>>,
     dead: bool,
     connected: bool,
@@ -166,29 +166,33 @@ impl ReplayManager {
 
     fn update_client(client: &mut ReplayClient, pcap_addr: SocketAddr, ts: u64) {
         let stream = &mut client.stream;
-        let skip = stream.find_frame(true);
-        if skip > 0 {
-            warn!("[{}] Corrupted stream, resync", pcap_addr);
-            stream.consume(skip);
-        }
-        while let Some((length, frame)) = stream.read_frame() {
-            if should_replay_frame(frame.tag) {
-                break;
-            } else {
-                stream.consume(length);
+
+        while stream.state != ConnState::Normal && stream.state != ConnState::CopyIn {
+            match stream.find_frame() {
+                FrameResult::Complete(info) => {
+                    client.sent_offset = client.sent_offset.max(info.stream_end);
+                    stream.consume_frame(&info);
+                }
+                FrameResult::Incomplete => {
+                    return;
+                }
+                FrameResult::Desync => {
+                    warn!("[{}] desync", pcap_addr);
+                    stream.resync();
+                }
             }
         }
-        if let Some(packet) = stream.read_packet() {
-            if !should_replay_frame(packet[0]) {
-                return;
-            }
+        if let Some(rem) = stream.read_remaining(client.sent_offset) {
             if let Some(chan) = &client.chan {
                 let msg = ClientMessage {
                     ts,
-                    buf: packet.to_vec(),
+                    buf: rem.to_vec(),
                 };
                 match chan.send(msg) {
-                    Ok(()) => {}
+                    Ok(()) => {
+                        client.sent_offset += rem.len();
+                        stream.mark_read(client.sent_offset);
+                    }
                     Err(_e) => {
                         info!("Removed client");
                         client.dead = true;

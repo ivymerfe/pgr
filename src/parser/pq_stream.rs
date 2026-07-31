@@ -1,21 +1,58 @@
 use etherparse::TcpSlice;
 use std::collections::BTreeMap;
 
+const CLIENT_TAGS: &[u8] = b"QPBDECfcpSHX";
+const RESYNC_CHAIN_LEN: usize = 3;
+const SSL_REQUEST_CODE: u32 = 80877103;
+const GSS_REQUEST_CODE: u32 = 80877104;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnState {
+    Unknown,
+    AwaitingStartup,
+    Normal,
+    CopyIn,
+}
+
+impl Default for ConnState {
+    fn default() -> Self {
+        ConnState::Unknown
+    }
+}
+
+pub struct FrameContent<'a> {
+    pub data: &'a [u8],
+    pub body: &'a [u8],
+}
+
 #[derive(Default)]
 pub struct PqStream {
     buf: Vec<u8>,
-    head: usize,
-    packet_head: usize,
-    drained: usize,
-    packet_count: usize,
+    buf_offset: usize,
+
+    read_offset: usize,
+    frame_offset: usize,
+
     next_seq: Option<u32>,
     reorder: BTreeMap<u32, Vec<u8>>,
+    pub packet_count: usize,
+    pub reorder_count: usize,
+    pub state: ConnState,
 }
 
-pub struct PqFrame<'a> {
+#[derive(Debug, Copy, Clone)]
+pub struct FrameInfo {
+    pub stream_start: usize,
+    pub stream_end: usize,
+    pub body_offset: usize,
     pub tag: u8,
-    pub offset: usize,
-    pub payload: &'a [u8],
+    pub code: Option<u32>,
+}
+
+pub enum FrameResult {
+    Complete(FrameInfo),
+    Incomplete,
+    Desync,
 }
 
 impl PqStream {
@@ -23,39 +60,16 @@ impl PqStream {
         if self.next_seq.is_none() {
             self.next_seq = Some(syn_seq.wrapping_add(1));
         }
-    }
-
-    pub fn len(&self) -> usize {
-        self.buf.len().saturating_sub(self.head)
-    }
-
-    pub fn offset(&self) -> usize {
-        self.drained + self.head
-    }
-
-    pub fn packet_count(&self) -> usize {
-        self.packet_count
-    }
-
-    fn compact_if_needed(&mut self) {
-        if self.head > 65_536 && self.head >= self.buf.len() / 2 {
-            self.buf.drain(0..self.head);
-            self.head = 0;
-            self.packet_head = self.packet_head.saturating_sub(self.head);
-            self.drained += self.head;
+        if self.state == ConnState::Unknown {
+            self.state = ConnState::AwaitingStartup;
+            self.frame_offset = self.buf_offset + self.buf.len();
         }
-    }
-
-    pub fn consume(&mut self, length: usize) {
-        self.head += length;
-        self.compact_if_needed();
     }
 
     pub fn process_packet(&mut self, tcp: TcpSlice) -> bool {
         let seq = tcp.sequence_number();
         let effective_seq = if tcp.syn() {
             self.set_isn(seq);
-            // RFC 793
             seq.wrapping_add(1)
         } else {
             seq
@@ -82,7 +96,6 @@ impl PqStream {
         let delta = seq.wrapping_sub(next) as i32;
 
         if delta == 0 {
-            self.packet_head = self.buf.len();
             self.buf.extend_from_slice(payload);
 
             let mut new_next = next.wrapping_add(payload.len() as u32);
@@ -98,80 +111,209 @@ impl PqStream {
                 return self.ingest(next, &payload[overlap..]);
             }
         } else {
+            self.reorder_count += 1;
             self.reorder.insert(seq, payload.to_vec());
         }
         return false;
     }
 
-    pub fn read_packet(&self) -> Option<&[u8]> {
-        if self.len() == 0 {
-            return None;
+    fn compact_buffer(&mut self) {
+        let read_size = self.read_offset.saturating_sub(self.buf_offset);
+        if read_size > 65_536 {
+            self.buf.drain(0..read_size);
+            self.buf_offset = self.read_offset;
         }
-        let head = self.head.max(self.packet_head);
-        return Some(&self.buf[head..]);
     }
 
-    pub fn read_frame(&self) -> Option<(usize, PqFrame<'_>)> {
-        if self.len() < 4 {
-            return None;
-        }
-        let buf = &self.buf[self.head..];
-
-        let (tag, frame_offset, frame_length) = if buf[0] == 0x00 {
-            // 1. Headerless messages (SSLRequest, StartupMessage, CancelRequest)
-            let length = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
-            if !(8..=10_000_000).contains(&length) {
-                return None;
-            }
-            if buf.len() < length {
-                return None;
-            }
-            (0, 4, length)
-        } else {
-            // 2. [Tag: 1 byte][Length: 4 bytes][Payload: Length - 4]
-            if buf.len() < 5 {
-                return None;
-            }
-            let length = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
-            if !(4..=10_000_000).contains(&length) {
-                return None;
-            }
-            let frame_length = 1 + length;
-            if buf.len() < frame_length {
-                return None;
-            }
-            (buf[0], 5, frame_length)
-        };
-        let buf = &self.buf[self.head..self.head + frame_length];
-        let frame = PqFrame {
-            tag,
-            offset: frame_offset,
-            payload: buf,
-        };
-        return Some((frame_length, frame));
+    pub fn mark_read(&mut self, offset: usize) {
+        self.read_offset = self.read_offset.max(offset.min(self.frame_offset));
+        self.compact_buffer();
     }
 
-    pub fn find_frame(&self, is_frontend: bool) -> usize {
-        let valid_tags: &[u8] = if is_frontend {
-            b"QPBDECfcpSHX\0"
-        } else {
-            b"RKZCS123nsITtDEAN\0"
-        };
-        let mut offset = self.head;
-        while offset + 4 < self.buf.len() {
-            let tag = self.buf[self.head];
-            let len = u32::from_be_bytes([
-                self.buf[self.head + 1],
-                self.buf[self.head + 2],
-                self.buf[self.head + 3],
-                self.buf[self.head + 4],
-            ]) as usize;
+    pub fn read_remaining(&self, offset: usize) -> Option<&[u8]> {
+        if offset < self.buf_offset || offset - self.buf_offset >= self.buf.len() {
+            return None;
+        }
+        return Some(&self.buf[offset - self.buf_offset..]);
+    }
 
-            if valid_tags.contains(&tag) && (4..=10_000_000).contains(&len) {
-                break;
+    pub fn read_frame(&self, info: &FrameInfo) -> FrameContent<'_> {
+        assert!(
+            info.stream_start >= self.buf_offset,
+            "read_frame has been called on destroyed frame"
+        );
+        assert!(
+            info.stream_end <= self.buf_offset + self.buf.len(),
+            "read_frame has been called on incomplete frame"
+        );
+        let start_offset = info.stream_start - self.buf_offset;
+        let end_offset = info.stream_end - self.buf_offset;
+        return FrameContent {
+            data: &self.buf[start_offset..end_offset],
+            body: &self.buf[start_offset + info.body_offset..end_offset],
+        };
+    }
+
+    pub fn find_frame(&self) -> FrameResult {
+        if self.frame_offset < self.buf_offset {
+            unreachable!(
+                "content at self.frame_offset was destroyed, read offset could have been modified outside of mark_read"
+            );
+        }
+        let start = self.frame_offset;
+        if start > self.buf_offset + self.buf.len() {
+            return FrameResult::Incomplete;
+        }
+
+        let parsed = match self.state {
+            ConnState::AwaitingStartup => self.try_parse_startup(start),
+            ConnState::Normal | ConnState::CopyIn => self.try_parse_tagged(start),
+            ConnState::Unknown => return self.read_frame_resync(start),
+        };
+
+        match parsed {
+            Ok(Some(info)) => FrameResult::Complete(info),
+            Ok(None) => FrameResult::Incomplete,
+            Err(()) => FrameResult::Desync,
+        }
+    }
+
+    pub fn consume_frame(&mut self, info: &FrameInfo) {
+        assert_eq!(
+            info.stream_start, self.frame_offset,
+            "consume_frame called with a stale/mismatched frame"
+        );
+        self.frame_offset = info.stream_end;
+
+        match self.state {
+            ConnState::AwaitingStartup => {
+                self.advance_state_from_startup(info.code);
+            }
+            ConnState::Unknown => {
+                self.state = ConnState::Normal;
+            }
+            ConnState::Normal | ConnState::CopyIn => {
+                self.advance_state_from_tag(info.tag);
+            }
+        }
+    }
+
+    fn read_frame_resync(&self, start_offset: usize) -> FrameResult {
+        let end_offset = self.buf_offset + self.buf.len();
+        let mut offset = start_offset;
+        while offset < end_offset {
+            if self.chain_valid(offset, RESYNC_CHAIN_LEN) {
+                match self.try_parse_tagged(offset) {
+                    Ok(Some(info)) => return FrameResult::Complete(info),
+                    _ => unreachable!("chain_valid guarantees a valid first frame"),
+                }
             }
             offset += 1;
         }
-        return offset - self.head;
+        FrameResult::Incomplete
+    }
+
+    pub fn resync(&mut self) {
+        self.state = ConnState::Unknown;
+    }
+
+    fn try_parse_startup(&self, offset: usize) -> Result<Option<FrameInfo>, ()> {
+        let pos = offset - self.buf_offset;
+
+        let remaining = self.buf.len() - pos;
+        if remaining < 4 {
+            return Ok(None);
+        }
+        if self.buf[pos] != 0x00 {
+            return Err(());
+        }
+        let length = u32::from_be_bytes([
+            self.buf[pos],
+            self.buf[pos + 1],
+            self.buf[pos + 2],
+            self.buf[pos + 3],
+        ]) as usize;
+        if !(8..=10_000_000).contains(&length) {
+            return Err(());
+        }
+        if remaining < length {
+            return Ok(None);
+        }
+        let code = if length >= 8 {
+            Some(u32::from_be_bytes([
+                self.buf[pos + 4],
+                self.buf[pos + 5],
+                self.buf[pos + 6],
+                self.buf[pos + 7],
+            ]))
+        } else {
+            None
+        };
+        Ok(Some(FrameInfo {
+            stream_start: offset,
+            stream_end: offset + length,
+            body_offset: 4,
+            tag: 0,
+            code,
+        }))
+    }
+
+    // (frame_len, tag, body_start)
+    fn try_parse_tagged(&self, offset: usize) -> Result<Option<FrameInfo>, ()> {
+        let pos = offset - self.buf_offset;
+
+        let remaining = self.buf.len() - pos;
+        if remaining < 5 {
+            return Ok(None);
+        }
+        let tag = self.buf[pos];
+        if !CLIENT_TAGS.contains(&tag) {
+            return Err(());
+        }
+        let length = u32::from_be_bytes([
+            self.buf[pos + 1],
+            self.buf[pos + 2],
+            self.buf[pos + 3],
+            self.buf[pos + 4],
+        ]) as usize;
+        if !(4..=10_000_000).contains(&length) {
+            return Err(());
+        }
+        let frame_length = 1 + length;
+        if remaining < frame_length {
+            return Ok(None);
+        }
+        Ok(Some(FrameInfo {
+            stream_start: offset,
+            stream_end: offset + frame_length,
+            body_offset: 5,
+            tag,
+            code: None,
+        }))
+    }
+
+    fn chain_valid(&self, mut offset: usize, count: usize) -> bool {
+        for _ in 0..count {
+            match self.try_parse_tagged(offset) {
+                Ok(Some(info)) => offset = info.stream_end,
+                _ => return false,
+            }
+        }
+        true
+    }
+
+    fn advance_state_from_startup(&mut self, code: Option<u32>) {
+        match code {
+            Some(c) if c == SSL_REQUEST_CODE || c == GSS_REQUEST_CODE => {}
+            _ => self.state = ConnState::Normal,
+        }
+    }
+
+    fn advance_state_from_tag(&mut self, tag: u8) {
+        match self.state {
+            ConnState::Normal if tag == b'd' => self.state = ConnState::CopyIn,
+            ConnState::CopyIn if tag == b'c' || tag == b'f' => self.state = ConnState::Normal,
+            _ => {}
+        }
     }
 }

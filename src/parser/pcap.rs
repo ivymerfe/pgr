@@ -21,6 +21,7 @@ pub struct CaptureReader<'a> {
     consume: usize,
     refill: bool,
     pub bytes_read: usize,
+    pub fail_count: usize,
 }
 
 impl<'a> CaptureReader<'a> {
@@ -30,6 +31,7 @@ impl<'a> CaptureReader<'a> {
             consume: 0,
             refill: false,
             bytes_read: 0,
+            fail_count: 0
         })
     }
 
@@ -50,6 +52,8 @@ impl<'a> CaptureReader<'a> {
                 self.consume += consumed;
                 if let Some(packet) = process_block(block) {
                     return ReadState::Ok(packet);
+                } else {
+                    self.fail_count += 1;
                 }
             }
             Err(PcapError::Eof) => return ReadState::Eof,
