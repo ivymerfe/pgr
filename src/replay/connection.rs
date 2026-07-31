@@ -6,7 +6,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 #[derive(Clone, Default)]
-pub struct Config {
+pub struct ReplayConfig {
     pub user: String,
     pub password: Option<Vec<u8>>,
     pub dbname: String,
@@ -15,14 +15,14 @@ pub struct Config {
 pub struct ReplayConnection {
     stream: TcpStream,
     read_buf: BytesMut,
-    pub config: Config,
+    pub config: ReplayConfig,
     pub addr: SocketAddr,
 }
 
 impl ReplayConnection {
     pub async fn connect(
         addr: SocketAddr,
-        config: Config,
+        config: ReplayConfig,
     ) -> Result<ReplayConnection, ReplayError> {
         let stream = TcpStream::connect(addr).await?;
         stream.set_nodelay(true)?;
@@ -42,15 +42,15 @@ impl ReplayConnection {
             let msg = client.next_message().await?;
             match msg {
                 BackendMessage::Authentication(auth) => client.handle_auth(auth).await?,
-                BackendMessage::ParameterStatus { name: _, value: _ } => {
+                BackendMessage::ParameterStatus { _name: _, _value: _ } => {
                     // parameters.insert(name, value);
                 }
-                BackendMessage::BackendKeyData { pid: _, .. } => {
+                BackendMessage::BackendKeyData { _pid: _, .. } => {
                     // process_id = pid;
                 }
                 BackendMessage::ReadyForQuery => break,
                 BackendMessage::ErrorResponse(e) => return Err(ReplayError::ErrorResponse(e)),
-                BackendMessage::NoticeResponse | BackendMessage::Other(..) => {}
+                BackendMessage::NoticeResponse | BackendMessage::Other { .. } => {}
             }
         }
         Ok(client)
@@ -152,12 +152,12 @@ impl From<std::io::Error> for ReplayError {
 
 pub enum BackendMessage {
     Authentication(Authentication),
-    ParameterStatus { name: String, value: String },
-    BackendKeyData { pid: i32, secret: i32 },
+    ParameterStatus { _name: String, _value: String },
+    BackendKeyData { _pid: i32, _secret: i32 },
     ReadyForQuery,
     ErrorResponse(String),
     NoticeResponse,
-    Other(u8, BytesMut),
+    Other { _tag: u8, _frame: BytesMut },
 }
 
 pub enum Authentication {
@@ -208,17 +208,17 @@ fn try_parse(src: &mut BytesMut) -> Option<BackendMessage> {
         b'S' => {
             let name = read_cstr(&mut frame);
             let value = read_cstr(&mut frame);
-            BackendMessage::ParameterStatus { name, value }
+            BackendMessage::ParameterStatus { _name: name, _value: value }
         }
         b'K' => {
             let pid = frame.get_i32();
             let secret = frame.get_i32();
-            BackendMessage::BackendKeyData { pid, secret }
+            BackendMessage::BackendKeyData { _pid: pid, _secret: secret }
         }
         b'Z' => BackendMessage::ReadyForQuery,
         b'E' => BackendMessage::ErrorResponse(read_cstr(&mut frame)),
         b'N' => BackendMessage::NoticeResponse,
-        other => BackendMessage::Other(other, frame),
+        other => BackendMessage::Other { _tag: other, _frame: frame },
     })
 }
 

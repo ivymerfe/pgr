@@ -10,6 +10,7 @@ use std::{
 use tokio::{
     sync::{Mutex, mpsc},
     task::JoinSet,
+    time::sleep,
 };
 use tracing::{error, info, warn};
 
@@ -20,7 +21,7 @@ use crate::{
     },
     replay::{
         addr_map::AddrMap,
-        socket::{Config, ReplayConnection, ReplayError},
+        connection::{ReplayConfig, ReplayConnection, ReplayError},
         stats::ReplayStats,
         wait::WaitInfo,
     },
@@ -34,7 +35,7 @@ struct ClientMessage {
 #[derive(Clone)]
 struct ClientInfo {
     server_addr: SocketAddr,
-    config: Config,
+    config: ReplayConfig,
     addr_map: Arc<Mutex<AddrMap>>,
     stats: Arc<ReplayStats>,
 }
@@ -64,7 +65,7 @@ impl ReplayManager {
     ) -> Result<Self, Box<dyn Error>> {
         let addr: IpAddr = host.parse()?;
         let addr_map = AddrMap::new(addr_map_path).await?;
-        let config = Config {
+        let config = ReplayConfig {
             user: user,
             password: password.map(|s| s.as_bytes().to_vec()),
             dbname: dbname,
@@ -103,7 +104,7 @@ impl ReplayManager {
 
         let mut capture_reader = CaptureReader::new(std::fs::File::open(input_path)?)?;
 
-        let mut wait = WaitInfo::new();
+        let mut wait = None;
         let mut tasks = JoinSet::new();
         loop {
             match capture_reader.next() {
@@ -111,13 +112,16 @@ impl ReplayManager {
                     if packet.tcp.destination_port() != cap_port {
                         continue;
                     }
-                    wait.pcap_ts(packet.ts);
+                    let wait = wait.get_or_insert_with(|| WaitInfo::start(packet.ts));
                     if let Some(client) =
-                        self.ensure_client(packet.addr, packet.ts, &mut tasks, &wait)
+                        self.ensure_client(packet.addr, packet.ts, &mut tasks, wait)
                     {
                         if client.stream.process_packet(packet.tcp) {
                             Self::update_client(client, packet.addr, packet.ts);
                         }
+                    }
+                    if wait.time_to(packet.ts) > 4_000_000 {
+                        sleep(Duration::from_secs(3)).await;
                     }
                 }
                 ReadState::Continue => (),
@@ -141,7 +145,7 @@ impl ReplayManager {
     fn ensure_client(
         &mut self,
         pcap_addr: SocketAddr,
-        start_ts: u64,
+        conn_ts: u64,
         tasks: &mut JoinSet<()>,
         wait: &WaitInfo,
     ) -> Option<&mut ReplayClient> {
@@ -156,7 +160,7 @@ impl ReplayManager {
                 pcap_addr,
                 self.info.clone(),
                 wait.clone(),
-                start_ts,
+                conn_ts,
                 rx,
             ));
             client.connected = true;
@@ -206,12 +210,13 @@ impl ReplayManager {
 async fn client_proc(
     me: SocketAddr,
     info: ClientInfo,
-    wait: WaitInfo,
-    start_ts: u64,
+    mut conn_wait: WaitInfo,
+    conn_ts: u64,
     mut rx: mpsc::UnboundedReceiver<ClientMessage>,
 ) {
-    wait.until(start_ts).await;
+    conn_wait.until(conn_ts).await;
 
+    let mut wait = WaitInfo::start(conn_ts);
     info!("[{me}] Connecting");
     let mut socket = match ReplayConnection::connect(info.server_addr, info.config.clone()).await {
         Ok(s) => s,

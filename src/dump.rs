@@ -1,4 +1,3 @@
-use pcap_parser::nom::Complete;
 use std::collections::HashMap;
 use std::io::BufWriter;
 use std::io::Write;
@@ -11,7 +10,7 @@ use crate::parser::pq_stream::FrameResult;
 use crate::parser::pq_stream::PqStream;
 use crate::parser::{c2s::parse_pg_message, pcap::CaptureReader};
 
-pub fn dump(
+pub fn run(
     input_path: &PathBuf,
     output_path: &PathBuf,
     cap_port: u16,
@@ -32,7 +31,7 @@ pub fn dump(
                         match stream.find_frame() {
                             FrameResult::Complete(info) => {
                                 let frame = stream.read_frame(&info);
-                                match parse_pg_message(info.tag, &frame.body) {
+                                match parse_pg_message(info.tag, &frame) {
                                     Ok(msg) => {
                                         writeln!(
                                             writer,

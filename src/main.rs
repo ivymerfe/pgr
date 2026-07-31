@@ -130,7 +130,7 @@ async fn main()-> Result<(), Box<dyn Error>> {
 
     let format = format_description!("[hour]:[minute]:[second]");
     let timer = OffsetTime::new(local_offset, format);
-    tracing_subscriber::fmt().with_timer(timer).init();
+    tracing_subscriber::fmt().with_timer(timer).with_target(false).init();
 
     match run_command(cli).await {
         Ok(()) => (),
@@ -154,8 +154,8 @@ async fn run_command(cli: Cli) -> Result<(), Box<dyn Error>> {
                 return Ok(());
             }
             let map_path = path::absolute(&client_map)?;
-            info!("Replaying {}[port={cap_port},map={}] at host={host} port={port} user={user}",
-                map_path.display(), input_path.display());
+            info!("Replaying {}[port={cap_port}] at host={host} port={port} user={user}", input_path.display());
+            info!("Map path: {}", map_path.display());
             let mut mgr = ReplayManager::new(map_path, host, port, dbname, user, pass).await?;
             mgr.replay(input_path, cap_port).await?;
         }
@@ -173,7 +173,7 @@ async fn run_command(cli: Cli) -> Result<(), Box<dyn Error>> {
                 return Ok(());
             }
             info!("Dump {}[port={cap_port}] -> {}", input_path.display(), output_path.display());
-            dump::dump(&input_path, &output_path, cap_port)?;
+            dump::run(&input_path, &output_path, cap_port)?;
         }
         Commands::Compare { c1, c2, client_map, port1, port2 } => {
             let mut c1_path = path::absolute(&c1)?;
@@ -200,7 +200,7 @@ async fn run_command(cli: Cli) -> Result<(), Box<dyn Error>> {
             info!("Compare {}[{port1}] <=> {}[{port2}]", c1_path.display(), c2_path.display());
             info!("Map file: {}", map_path.display());
             let mut map = CompareMap::new(map_path)?;
-            compare::compare(&mut map, c1, c2, port1, port2)?;
+            compare::normal::run(&mut map, c1, c2, port1, port2)?;
         }
     }
     Ok(())

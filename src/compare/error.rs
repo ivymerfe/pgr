@@ -1,11 +1,11 @@
 use core::fmt;
 use std::error::Error;
+use std::fmt::Write;
 use std::fmt::{Display, Formatter};
-use std::fmt::{Write, write};
 use std::net::SocketAddr;
 
 use crate::parser::c2s::parse_pg_message;
-use crate::parser::pq_stream::{FrameContent, FrameInfo};
+use crate::parser::pq_stream::FrameInfo;
 
 #[derive(Debug)]
 pub enum CompareError {
@@ -28,20 +28,14 @@ fn escape_bytes(bytes: &[u8]) -> String {
         .collect()
 }
 
-fn get_frame_content(info: &FrameInfo, frame: FrameContent) -> Result<String, fmt::Error> {
+fn get_frame_content(info: &FrameInfo, frame: &[u8]) -> Result<String, fmt::Error> {
     let mut content = String::with_capacity(1024);
-    match parse_pg_message(info.tag, frame.body) {
+    match parse_pg_message(info.tag, frame) {
         Ok(msg) => {
             write!(content, "{}", msg)?;
         }
         Err(e) => {
-            write!(
-                content,
-                "({}):{} -> {}",
-                e,
-                info.tag,
-                escape_bytes(frame.body)
-            )?;
+            write!(content, "({}):{} -> {}", e, info.tag, escape_bytes(frame))?;
         }
     }
     return Ok(content);
@@ -51,10 +45,10 @@ impl CompareError {
     pub fn new_frame_error(
         addr1: SocketAddr,
         info1: &FrameInfo,
-        frame1: FrameContent,
+        frame1: &[u8],
         addr2: SocketAddr,
         info2: &FrameInfo,
-        frame2: FrameContent,
+        frame2: &[u8],
     ) -> Self {
         let content1 = match get_frame_content(info1, frame1) {
             Ok(c) => c,

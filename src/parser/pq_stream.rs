@@ -20,11 +20,6 @@ impl Default for ConnState {
     }
 }
 
-pub struct FrameContent<'a> {
-    pub data: &'a [u8],
-    pub body: &'a [u8],
-}
-
 #[derive(Default)]
 pub struct PqStream {
     buf: Vec<u8>,
@@ -137,7 +132,7 @@ impl PqStream {
         return Some(&self.buf[offset - self.buf_offset..]);
     }
 
-    pub fn read_frame(&self, info: &FrameInfo) -> FrameContent<'_> {
+    pub fn read_frame(&self, info: &FrameInfo) -> &[u8] {
         assert!(
             info.stream_start >= self.buf_offset,
             "read_frame has been called on destroyed frame"
@@ -148,10 +143,7 @@ impl PqStream {
         );
         let start_offset = info.stream_start - self.buf_offset;
         let end_offset = info.stream_end - self.buf_offset;
-        return FrameContent {
-            data: &self.buf[start_offset..end_offset],
-            body: &self.buf[start_offset + info.body_offset..end_offset],
-        };
+        return &self.buf[start_offset + info.body_offset..end_offset];
     }
 
     pub fn find_frame(&self) -> FrameResult {

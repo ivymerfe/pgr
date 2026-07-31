@@ -13,28 +13,54 @@ pub struct ClientPair {
     pub c2: Client,
 }
 
+#[derive(Default)]
+pub struct CompareStats {
+    pub cnt_behind: i64,
+    pub avg_behind: f64,
+    pub max_behind: f64,
+    pub cnt_ahead: i64,
+    pub avg_ahead: f64,
+    pub max_ahead: f64,
+}
+
+fn divide_or_zero(a: f64, b: f64) -> f64 {
+    if b != 0.0 { a / b } else { 0.0 }
+}
+
 impl ClientPair {
-    pub fn avg_max(&self) -> (f64, f64) {
+    pub fn avg_max(&self) -> CompareStats {
         let t1 = &self.c1.timings;
         let t2 = &self.c2.timings;
 
         let len = t1.len().min(t2.len());
-        if len == 0 {
-            return (0.0, 0.0);
-        }
-        let base1 = t1[0];
-        let base2 = t2[0];
-        let (mut max, mut sum) = (0.0f64, 0.0f64);
-        for i in 1..len {
+        let base1 = self.c1.connect_ts;
+        let base2 = self.c2.connect_ts;
+
+        let (mut cnt_behind, mut cnt_ahead) = (0, 0);
+        let (mut max_behind, mut sum_behind) = (0.0f64, 0.0f64);
+        let (mut max_ahead, mut sum_ahead) = (0.0f64, 0.0f64);
+        for i in 0..len {
             let rel_1 = (t1[i] - base1) as f64;
             let rel_2 = (t2[i] - base2) as f64;
             let delta = rel_2 - rel_1;
-            if delta.abs() > max.abs() {
-                max = delta;
+            if delta > 0.0 {
+                cnt_behind += 1;
+                sum_behind += delta;
+                max_behind = max_behind.max(delta);
+            } else {
+                cnt_ahead += 1;
+                sum_ahead += delta;
+                max_ahead = max_ahead.min(delta);
             }
-            sum += delta.abs();
         }
-        return (sum / (len as f64), max);
+        return CompareStats {
+            cnt_behind,
+            avg_behind: divide_or_zero(sum_behind, cnt_behind as f64),
+            max_behind,
+            cnt_ahead,
+            avg_ahead: divide_or_zero(sum_ahead, cnt_ahead as f64),
+            max_ahead,
+        };
     }
 }
 

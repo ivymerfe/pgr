@@ -1,5 +1,5 @@
 mod addr_map;
 pub mod client;
-mod socket;
+mod connection;
 mod stats;
 mod wait;
