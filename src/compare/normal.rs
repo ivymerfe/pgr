@@ -4,7 +4,7 @@ use std::{error::Error, path::Path};
 
 use tracing::{error, info, warn};
 
-use crate::compare::error::CompareError;
+use crate::compare::error::{CompareError, format_frame_mismatch};
 use crate::compare::pair::{ComparePair, PairMap};
 use crate::parser::pcap::{CaptureReader, ReadState};
 
@@ -131,14 +131,8 @@ fn check_pair(pair: &mut ComparePair) -> Result<(), CompareError> {
         let (info1, ts1, frame1) = pair.c1.get_frame();
         let (info2, ts2, frame2) = pair.c2.get_frame();
         if frame1 != frame2 {
-            return Err(CompareError::new_frame_error(
-                pair.c1.addr,
-                info1,
-                frame1,
-                pair.c2.addr,
-                info2,
-                frame2,
-            ));
+            let e = format_frame_mismatch(pair.c1.addr, info1, frame1, pair.c2.addr, info2, frame2);
+            return Err(e);
         }
         pair.stats.update_ts(
             ts1.saturating_sub(pair.c1.connect_ts),

@@ -17,7 +17,7 @@ impl AddrMap {
         pcap_addr: SocketAddr,
         replay_addr: SocketAddr,
     ) -> Result<(), std::io::Error> {
-        let entry = format!("{pcap_addr} -> {replay_addr}\n");
+        let entry = format!("{pcap_addr},{replay_addr}\n");
         self.file.write_all(entry.as_bytes()).await?;
         Ok(())
     }

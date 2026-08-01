@@ -65,7 +65,7 @@ impl PairMap {
             if trimmed.is_empty() || trimmed.starts_with('#') {
                 continue;
             }
-            let mut parts = trimmed.split("->");
+            let mut parts = trimmed.split(",");
             let left_str = parts.next().ok_or("Missing left SocketAddr")?.trim();
             let right_str = parts.next().ok_or("Missing right SocketAddr")?.trim();
 

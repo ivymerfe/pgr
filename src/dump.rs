@@ -5,10 +5,11 @@ use std::{fs::File, path::PathBuf};
 use tracing::warn;
 use tracing::{error, info};
 
+use crate::parser::c2s_display::TagFrame;
+use crate::parser::pcap::CaptureReader;
 use crate::parser::pcap::ReadState;
 use crate::parser::pq_stream::FrameResult;
 use crate::parser::pq_stream::PqStream;
-use crate::parser::{c2s::parse_pg_message, pcap::CaptureReader};
 
 pub fn run(
     input_path: &PathBuf,
@@ -31,18 +32,14 @@ pub fn run(
                         match stream.find_frame() {
                             FrameResult::Complete(info) => {
                                 let frame = stream.read_frame(&info);
-                                match parse_pg_message(info.tag, &frame) {
-                                    Ok(msg) => {
-                                        writeln!(
-                                            writer,
-                                            "[{}]:{} ({}) -> {}",
-                                            packet.addr, stream.packet_count, packet.ts, msg
-                                        )?;
-                                    }
-                                    Err(e) => {
-                                        error!("Failed to parse message: {e}");
-                                    }
-                                }
+                                writeln!(
+                                    writer,
+                                    "{},{},{},{}",
+                                    packet.addr,
+                                    stream.packet_count,
+                                    packet.ts,
+                                    TagFrame(info.tag, frame)
+                                )?;
                                 stream.consume_frame(&info);
                                 stream.mark_read(info.stream_end);
                             }

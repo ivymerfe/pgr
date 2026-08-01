@@ -39,7 +39,7 @@ enum Commands {
         #[arg(
             short = 'm', 
             long, 
-            default_value = "replay.map", 
+            default_value = "replay.csv", 
         )]
         client_map: PathBuf,
 
@@ -103,7 +103,7 @@ enum Commands {
         #[arg(
             short = 'm', 
             long, 
-            default_value = "replay.map", 
+            default_value = "replay.csv", 
         )]
         client_map: PathBuf,
 
@@ -166,7 +166,7 @@ async fn run_command(cli: Cli) -> Result<(), Box<dyn Error>> {
             }
             let output_path = match output {
                 Some(path) => path::absolute(&path)?,
-                None => input_path.with_added_extension("dump")
+                None => input_path.with_added_extension("csv")
             };
             if !input_path.exists() {
                 error!("Input path does not exist: {}", input_path.display());
