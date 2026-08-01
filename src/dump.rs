@@ -20,11 +20,15 @@ pub fn run(
     let mut writer = BufWriter::with_capacity(131072, File::create(output_path)?);
 
     let mut streams = HashMap::new();
+    let mut start_ts = 0;
     loop {
         match capture_reader.next() {
             ReadState::Ok(packet) => {
                 if packet.tcp.destination_port() != cap_port {
                     continue;
+                }
+                if start_ts == 0 {
+                    start_ts = packet.ts;
                 }
                 let stream: &mut PqStream = streams.entry(packet.addr).or_default();
                 if stream.process_packet(packet.tcp) {
@@ -34,10 +38,9 @@ pub fn run(
                                 let frame = stream.read_frame(&info);
                                 writeln!(
                                     writer,
-                                    "{},{},{},{}",
+                                    "{:.6},{},{}",
+                                    packet.ts.saturating_sub(start_ts) as f64 / 1e6,
                                     packet.addr,
-                                    stream.packet_count,
-                                    packet.ts,
                                     TagFrame(info.tag, frame)
                                 )?;
                                 stream.consume_frame(&info);
@@ -64,9 +67,12 @@ pub fn run(
             }
         }
     }
-    info!("Failed to parse: {}", capture_reader.fail_count);
+    info!("Ignored packets: {}", capture_reader.fail_count);
     for (addr, stream) in &streams {
-        info!("{addr}: Reorder count = {}", stream.reorder_count);
+        info!(
+            "{addr}: Packets = {} / Reorder = {}",
+            stream.packet_count, stream.reorder_count
+        );
     }
     info!("Done");
     Ok(())

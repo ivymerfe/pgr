@@ -87,13 +87,14 @@ impl<'a> fmt::Display for PgC2S<'a> {
                 query,
                 parameter_type_oids,
             } => {
-                write!(f, "Parse,\"{}\",\"{}\",", name, query)?;
+                write!(f, "Parse,\"{}\",\"{}\",[", name, query)?;
                 for (i, oid) in parameter_type_oids.iter().enumerate() {
                     if i > 0 {
-                        write!(f, ";")?;
+                        f.write_char(';')?;
                     }
                     write!(f, "{}", oid)?;
                 }
+                f.write_char(']')?;
                 Ok(())
             }
             PgC2S::PasswordMessage(p) => write!(f, "PasswordMessage,\"{p}\""),
