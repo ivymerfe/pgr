@@ -13,7 +13,7 @@ pub struct ReplayConfig {
     pub application_name: String,
 }
 pub struct ReplayConnection {
-    stream: TcpStream,
+    pub stream: TcpStream,
     read_buf: BytesMut,
     pub config: ReplayConfig,
     pub addr: SocketAddr,
@@ -23,7 +23,7 @@ impl ReplayConnection {
     pub async fn connect(
         addr: SocketAddr,
         config: ReplayConfig,
-    ) -> Result<ReplayConnection, ReplayError> {
+    ) -> Result<ReplayConnection, ConnectionError> {
         let stream = TcpStream::connect(addr).await?;
         stream.set_nodelay(true)?;
         let local_addr = stream.local_addr()?;
@@ -49,14 +49,14 @@ impl ReplayConnection {
                     // process_id = pid;
                 }
                 BackendMessage::ReadyForQuery => break,
-                BackendMessage::ErrorResponse(e) => return Err(ReplayError::ErrorResponse(e)),
+                BackendMessage::ErrorResponse(e) => return Err(ConnectionError::ErrorResponse(e)),
                 BackendMessage::NoticeResponse | BackendMessage::Other { .. } => {}
             }
         }
         Ok(client)
     }
 
-    pub async fn next_message(&mut self) -> Result<BackendMessage, ReplayError> {
+    pub async fn next_message(&mut self) -> Result<BackendMessage, ConnectionError> {
         loop {
             if let Some(msg) = try_parse(&mut self.read_buf) {
                 return Ok(msg);
@@ -64,22 +64,13 @@ impl ReplayConnection {
             let mut chunk = [0u8; 4096];
             let n = self.stream.read(&mut chunk).await?;
             if n == 0 {
-                return Err(ReplayError::ConnectionClosed);
+                return Err(ConnectionError::ConnectionClosed);
             }
             self.read_buf.extend_from_slice(&chunk[..n]);
         }
     }
 
-    pub async fn read_dont_care(&mut self) -> Result<usize, ReplayError> {
-        let mut chunk = [0u8; 4096];
-        let n = self.stream.read(&mut chunk).await?;
-        if n == 0 {
-            return Err(ReplayError::ConnectionClosed);
-        }
-        Ok(n)
-    }
-
-    async fn startup(&mut self) -> Result<(), ReplayError> {
+    async fn startup(&mut self) -> Result<(), ConnectionError> {
         let mut params = Vec::new();
         params.push((
             "application_name".to_string(),
@@ -91,7 +82,7 @@ impl ReplayConnection {
         Ok(())
     }
 
-    async fn handle_auth(&mut self, auth: Authentication) -> Result<(), ReplayError> {
+    async fn handle_auth(&mut self, auth: Authentication) -> Result<(), ConnectionError> {
         match auth {
             Authentication::Ok => {}
             Authentication::Cleartext => {
@@ -115,7 +106,7 @@ impl ReplayConnection {
                 self.send_packet(&encode_password(&hashed)).await?;
             }
             Authentication::Unsupported(code) => {
-                return Err(ReplayError::UnsupportedAuth(code));
+                return Err(ConnectionError::UnsupportedAuth(code));
             }
         }
         Ok(())
@@ -126,27 +117,27 @@ impl ReplayConnection {
     }
 }
 
-pub enum ReplayError {
+pub enum ConnectionError {
     ConnectionClosed,
     UnsupportedAuth(i32),
     ErrorResponse(String),
     IoError(std::io::Error),
 }
 
-impl fmt::Display for ReplayError {
+impl fmt::Display for ConnectionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ReplayError::ConnectionClosed => write!(f, "connection closed"),
-            ReplayError::UnsupportedAuth(code) => write!(f, "unsupperted auth method: {code}"),
-            ReplayError::ErrorResponse(s) => write!(f, "server responded with error: {s}"),
-            ReplayError::IoError(err) => write!(f, "I/O error: {err}"),
+            ConnectionError::ConnectionClosed => write!(f, "connection closed"),
+            ConnectionError::UnsupportedAuth(code) => write!(f, "unsupperted auth method: {code}"),
+            ConnectionError::ErrorResponse(s) => write!(f, "server responded with error: {s}"),
+            ConnectionError::IoError(err) => write!(f, "I/O error: {err}"),
         }
     }
 }
 
-impl From<std::io::Error> for ReplayError {
+impl From<std::io::Error> for ConnectionError {
     fn from(err: std::io::Error) -> Self {
-        ReplayError::IoError(err)
+        ConnectionError::IoError(err)
     }
 }
 

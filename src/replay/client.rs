@@ -8,6 +8,7 @@ use std::{
 };
 
 use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
     sync::{Mutex, mpsc},
     task::JoinSet,
     time::sleep,
@@ -21,7 +22,7 @@ use crate::{
     },
     replay::{
         addr_map::AddrMap,
-        connection::{ReplayConfig, ReplayConnection, ReplayError},
+        connection::{ReplayConfig, ReplayConnection},
         stats::ReplayStats,
         wait::WaitInfo,
     },
@@ -218,7 +219,7 @@ async fn client_proc(
 
     let mut wait = WaitInfo::start(conn_ts);
     info!("[{me}] Connecting");
-    let mut socket = match ReplayConnection::connect(info.server_addr, info.config.clone()).await {
+    let socket = match ReplayConnection::connect(info.server_addr, info.config.clone()).await {
         Ok(s) => s,
         Err(e) => {
             error!("[{me}] Connection failed: {e}");
@@ -237,36 +238,35 @@ async fn client_proc(
     }
     drop(addr_map);
 
-    loop {
-        tokio::select! {
-            result = rx.recv() => {
-                match result {
-                    Some(msg) => {
-                        wait.until(msg.ts).await;
-                        if let Err(e) = socket.send_packet(&msg.buf).await {
-                            error!("[{me}] send failed: {e}");
-                            break;
-                        }
-                        info.stats.log_send();
+    let (mut read, mut write) = socket.stream.into_split();
+    let read_stats = info.stats.clone();
+    let read_handle = tokio::spawn(async move {
+        let mut chunk = [0u8; 65536];
+        loop {
+            match read.read(&mut chunk).await {
+                Ok(sz) => {
+                    if sz == 0 {
+                        break;
                     }
-                    None => break,
+                    read_stats.log_recv(sz);
                 }
-            }
-            result = socket.read_dont_care() => {
-                match result {
-                    Ok(sz) => {
-                        info.stats.log_recv(sz);
-                    }
-                    Err(ReplayError::ConnectionClosed) => {
-                        info!("[{me}] Disconnected");
-                        break;
-                    }
-                    Err(e) => {
-                        error!("[{me}] recv failed: {e}");
-                        break;
-                    }
+                Err(e) => {
+                    error!("[{}] read error: {}", me, e);
                 }
             }
         }
+    });
+    while let Some(msg) = rx.recv().await {
+        wait.until(msg.ts).await;
+        if let Err(e) = write.write_all(&msg.buf).await {
+            error!("[{me}] send failed: {e}");
+            break;
+        }
+        info.stats.log_send();
     }
+    match read_handle.await {
+        Ok(()) => (),
+        Err(e) => error!("[{}] wait error: {}", me, e),
+    };
+    info!("[{}] Disconnected", me);
 }

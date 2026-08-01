@@ -8,7 +8,7 @@ pub struct Client {
     pub addr: SocketAddr,
     pub stream: PqStream,
     pub connect_ts: u64,
-    pub timings: Vec<u64>,
+    pub frame_count: u64,
     pending: VecDeque<(FrameInfo, u64)>,
 }
 
@@ -18,7 +18,7 @@ impl Client {
             addr,
             stream: PqStream::default(),
             connect_ts: 0,
-            timings: Vec::new(),
+            frame_count: 0,
             pending: VecDeque::new(),
         }
     }
@@ -34,7 +34,7 @@ impl Client {
                         || self.stream.state == ConnState::CopyIn
                     {
                         self.pending.push_back((info, ts));
-                        self.timings.push(ts);
+                        self.frame_count += 1;
                     }
                     self.stream.consume_frame(&info);
                 }

@@ -7,7 +7,7 @@ use std::error::Error;
 
 use tracing::{error, info};
 
-use crate::compare::map::CompareMap;
+use crate::compare::pair::PairMap;
 use crate::replay::client::ReplayManager;
 
 mod parser;
@@ -199,7 +199,7 @@ async fn run_command(cli: Cli) -> Result<(), Box<dyn Error>> {
             }
             info!("Compare {}[{port1}] <=> {}[{port2}]", c1_path.display(), c2_path.display());
             info!("Map file: {}", map_path.display());
-            let mut map = CompareMap::new(map_path)?;
+            let mut map = PairMap::new(map_path)?;
             compare::normal::run(&mut map, c1, c2, port1, port2)?;
         }
     }

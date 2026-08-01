@@ -20,12 +20,13 @@ pub enum CompareError {
     },
 }
 
-fn escape_bytes(bytes: &[u8]) -> String {
-    bytes
-        .iter()
-        .flat_map(|&b| std::ascii::escape_default(b))
-        .map(char::from)
-        .collect()
+fn write_escaped_bytes(f: &mut String, bytes: &[u8]) -> fmt::Result {
+    for &b in bytes {
+        for c in std::ascii::escape_default(b) {
+            f.write_char(c as char)?;
+        }
+    }
+    Ok(())
 }
 
 fn get_frame_content(info: &FrameInfo, frame: &[u8]) -> Result<String, fmt::Error> {
@@ -35,7 +36,8 @@ fn get_frame_content(info: &FrameInfo, frame: &[u8]) -> Result<String, fmt::Erro
             write!(content, "{}", msg)?;
         }
         Err(e) => {
-            write!(content, "({}):{} -> {}", e, info.tag, escape_bytes(frame))?;
+            write!(content, "({}):{} -> ", e, info.tag)?;
+            write_escaped_bytes(&mut content, frame)?;
         }
     }
     return Ok(content);

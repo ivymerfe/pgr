@@ -8,70 +8,51 @@ use std::{
 
 use crate::compare::client::Client;
 
-pub struct ClientPair {
-    pub c1: Client,
-    pub c2: Client,
-}
-
 #[derive(Default)]
 pub struct CompareStats {
-    pub cnt_behind: i64,
-    pub avg_behind: f64,
+    pub cnt_behind: f64,
+    pub sum_behind: f64,
     pub max_behind: f64,
-    pub cnt_ahead: i64,
-    pub avg_ahead: f64,
+    pub cnt_ahead: f64,
+    pub sum_ahead: f64,
     pub max_ahead: f64,
+    pub total_updates: u64
 }
 
-fn divide_or_zero(a: f64, b: f64) -> f64 {
-    if b != 0.0 { a / b } else { 0.0 }
-}
-
-impl ClientPair {
-    pub fn avg_max(&self) -> CompareStats {
-        let t1 = &self.c1.timings;
-        let t2 = &self.c2.timings;
-
-        let len = t1.len().min(t2.len());
-        let base1 = self.c1.connect_ts;
-        let base2 = self.c2.connect_ts;
-
-        let (mut cnt_behind, mut cnt_ahead) = (0, 0);
-        let (mut max_behind, mut sum_behind) = (0.0f64, 0.0f64);
-        let (mut max_ahead, mut sum_ahead) = (0.0f64, 0.0f64);
-        for i in 0..len {
-            let rel_1 = (t1[i] - base1) as f64;
-            let rel_2 = (t2[i] - base2) as f64;
-            let delta = rel_2 - rel_1;
-            if delta > 0.0 {
-                cnt_behind += 1;
-                sum_behind += delta;
-                max_behind = max_behind.max(delta);
-            } else {
-                cnt_ahead += 1;
-                sum_ahead += delta;
-                max_ahead = max_ahead.min(delta);
-            }
+impl CompareStats {
+    pub fn update_ts(&mut self, rel_ts1: u64, rel_ts2: u64) {
+        self.total_updates += 1;
+        
+        let rel_1 = rel_ts1 as f64;
+        let rel_2 = rel_ts2 as f64;
+        let delta = rel_2 - rel_1;
+        if delta > 0.0 {
+            self.cnt_behind += 1.0;
+            self.sum_behind += delta;
+            self.max_behind = self.max_behind.max(delta);
+        } else {
+            self.cnt_ahead += 1.0;
+            self.sum_ahead += delta;
+            self.max_ahead = self.max_ahead.min(delta);
         }
-        return CompareStats {
-            cnt_behind,
-            avg_behind: divide_or_zero(sum_behind, cnt_behind as f64),
-            max_behind,
-            cnt_ahead,
-            avg_ahead: divide_or_zero(sum_ahead, cnt_ahead as f64),
-            max_ahead,
-        };
     }
 }
 
-#[derive(Default)]
-pub struct CompareMap {
-    c1_to_c2: HashMap<SocketAddr, SocketAddr>,
-    c2_to_c1: HashMap<SocketAddr, SocketAddr>,
-    pub clients: HashMap<SocketAddr, ClientPair>,
+pub struct ComparePair {
+    pub c1: Client,
+    pub c2: Client,
+    pub stats: CompareStats,
 }
 
-impl CompareMap {
+
+#[derive(Default)]
+pub struct PairMap {
+    c1_to_c2: HashMap<SocketAddr, SocketAddr>,
+    c2_to_c1: HashMap<SocketAddr, SocketAddr>,
+    pub clients: HashMap<SocketAddr, ComparePair>,
+}
+
+impl PairMap {
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
         let file = File::open(path)?;
         let reader = BufReader::new(file);
@@ -102,21 +83,22 @@ impl CompareMap {
         })
     }
 
-    fn get_or_create_pair(&mut self, c1_addr: SocketAddr, c2_addr: SocketAddr) -> &mut ClientPair {
-        self.clients.entry(c1_addr).or_insert_with(|| ClientPair {
+    fn get_or_create_pair(&mut self, c1_addr: SocketAddr, c2_addr: SocketAddr) -> &mut ComparePair {
+        self.clients.entry(c1_addr).or_insert_with(|| ComparePair {
             c1: Client::new(c1_addr),
             c2: Client::new(c2_addr),
+            stats: CompareStats::default()
         })
     }
 
-    pub fn find_c1(&mut self, c1_addr: SocketAddr) -> Option<&mut ClientPair> {
+    pub fn find_c1(&mut self, c1_addr: SocketAddr) -> Option<&mut ComparePair> {
         if let Some(c2_addr) = self.c1_to_c2.get(&c1_addr) {
             return Some(self.get_or_create_pair(c1_addr, c2_addr.clone()));
         }
         return None;
     }
 
-    pub fn find_c2(&mut self, c2_addr: SocketAddr) -> Option<&mut ClientPair> {
+    pub fn find_c2(&mut self, c2_addr: SocketAddr) -> Option<&mut ComparePair> {
         if let Some(c1_addr) = self.c2_to_c1.get(&c2_addr) {
             return Some(self.get_or_create_pair(c1_addr.clone(), c2_addr));
         }

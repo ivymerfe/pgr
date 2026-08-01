@@ -5,11 +5,11 @@ use std::{error::Error, path::Path};
 use tracing::{error, info, warn};
 
 use crate::compare::error::CompareError;
-use crate::compare::map::{ClientPair, CompareMap};
+use crate::compare::pair::{ComparePair, PairMap};
 use crate::parser::pcap::{CaptureReader, ReadState};
 
 pub fn run<P: AsRef<Path>>(
-    map: &mut CompareMap,
+    map: &mut PairMap,
     cap1: P,
     cap2: P,
     port1: u16,
@@ -126,35 +126,43 @@ pub fn run<P: AsRef<Path>>(
     Ok(())
 }
 
-fn check_pair(pair: &mut ClientPair) -> Result<(), CompareError> {
-    let c1 = &mut pair.c1;
-    let c2 = &mut pair.c2;
-    loop {
-        if c1.has_frame() && c2.has_frame() {
-            let (info1, _ts1, frame1) = c1.get_frame();
-            let (info2, _ts2, frame2) = c2.get_frame();
-            if frame1 != frame2 {
-                return Err(CompareError::new_frame_error(
-                    c1.addr, info1, frame1, c2.addr, info2, frame2,
-                ));
-            }
-            c1.next_frame();
-            c2.next_frame();
+fn check_pair(pair: &mut ComparePair) -> Result<(), CompareError> {
+    while pair.c1.has_frame() && pair.c2.has_frame() {
+        let (info1, ts1, frame1) = pair.c1.get_frame();
+        let (info2, ts2, frame2) = pair.c2.get_frame();
+        if frame1 != frame2 {
+            return Err(CompareError::new_frame_error(
+                pair.c1.addr,
+                info1,
+                frame1,
+                pair.c2.addr,
+                info2,
+                frame2,
+            ));
         }
-        break;
+        pair.stats.update_ts(
+            ts1.saturating_sub(pair.c1.connect_ts),
+            ts2.saturating_sub(pair.c2.connect_ts),
+        );
+        pair.c1.next_frame();
+        pair.c2.next_frame();
     }
     Ok(())
 }
 
-fn analyze(map: &CompareMap, c1_first_ts: u64, c2_first_ts: u64) {
+fn divide_or_zero(a: f64, b: f64) -> f64 {
+    if b != 0.0 { a / b } else { 0.0 }
+}
+
+fn analyze(map: &PairMap, c1_first_ts: u64, c2_first_ts: u64) {
     for pair in map.clients.values() {
-        let stats = pair.avg_max();
-        let frame_count_c1 = pair.c1.timings.len();
-        let frame_count_c2 = pair.c2.timings.len();
+        let stats = &pair.stats;
+        let frame_count_c1 = pair.c1.frame_count;
+        let frame_count_c2 = pair.c2.frame_count;
         if frame_count_c1 != frame_count_c2 {
             warn!(
                 "{} / {}: frame count mismatch: {} / {}",
-                pair.c1.addr, pair.c2.addr, frame_count_c1, frame_count_c2
+                pair.c2.addr, pair.c1.addr, frame_count_c1, frame_count_c2
             )
         }
         let rel_1 = (pair.c1.connect_ts - c1_first_ts) as f64;
@@ -164,11 +172,11 @@ fn analyze(map: &CompareMap, c1_first_ts: u64, c2_first_ts: u64) {
             pair.c2.addr,
             pair.c1.addr,
             (rel_2 - rel_1) / 1e3,
-            stats.avg_behind / 1e3,
+            divide_or_zero(stats.sum_behind, stats.cnt_behind) / 1e3,
             stats.max_behind / 1e3,
             stats.cnt_behind,
             stats.cnt_ahead,
-            stats.avg_ahead / 1e3,
+            divide_or_zero(stats.sum_ahead, stats.cnt_ahead) / 1e3,
             stats.max_ahead / 1e3,
         );
     }
