@@ -2,18 +2,20 @@ use clap::{Parser, Subcommand};
 use time::{UtcOffset, macros::format_description};
 use tracing_subscriber::fmt::time::OffsetTime;
 use std::env;
-use std::path::{self, PathBuf};
+use std::path::PathBuf;
 use std::error::Error;
 
 use tracing::{error, info};
 
 use crate::compare::pair::PairMap;
+use crate::replay::addr_map::AddrMap;
 use crate::replay::client::ReplayManager;
 
 mod parser;
 mod dump;
 mod replay;
 mod compare;
+mod utils;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None, arg_required_else_help = true, disable_help_flag = true)]
@@ -37,11 +39,11 @@ enum Commands {
         cap_port: u16,
 
         #[arg(
-            short = 'm', 
+            short, 
             long, 
             default_value = "replay.csv", 
         )]
-        client_map: PathBuf,
+        addr_map: PathBuf,
 
         #[arg(
             short,
@@ -101,11 +103,17 @@ enum Commands {
         c2: PathBuf,
 
         #[arg(
-            short = 'm', 
+            short, 
             long, 
             default_value = "replay.csv", 
         )]
-        client_map: PathBuf,
+        addr_map: PathBuf,
+
+        #[arg(
+            short, 
+            long, 
+        )]
+        delta: Option<PathBuf>,
 
         #[arg(
             long = "p1", 
@@ -144,63 +152,36 @@ async fn main()-> Result<(), Box<dyn Error>> {
 
 async fn run_command(cli: Cli) -> Result<(), Box<dyn Error>> {
     match cli.command {
-        Commands::Replay { input, cap_port, client_map, host, port, dbname, user, pass } => {
-            let mut input_path = path::absolute(&input)?;
-            if !input_path.exists() {
-                input_path.set_extension("pcap");  
-            }
-            if !input_path.exists() {
-                error!("Input path does not exist: {}", input_path.display());
-                return Ok(());
-            }
-            let map_path = path::absolute(&client_map)?;
+        Commands::Replay { input, cap_port, addr_map, host, port, dbname, user, pass } => {
+            let (map_path, map_file) = utils::try_open_a(addr_map, "csv").await?;
+            let (input_path, input_file) = utils::try_open(input, "pcap")?;
             info!("Replaying {}[port={cap_port}] at host={host} port={port} user={user}", input_path.display());
-            info!("Map path: {}", map_path.display());
-            let mut mgr = ReplayManager::new(map_path, host, port, dbname, user, pass).await?;
-            mgr.replay(input_path, cap_port).await?;
+            info!("Map: {}", map_path.display());
+            let map = AddrMap::new(map_file);
+            let mut mgr = ReplayManager::new(map, host, port, dbname, user, pass).await?;
+            mgr.replay(input_file, cap_port).await?;
         }
         Commands::Dump { input, output, cap_port } => {
-            let mut input_path = path::absolute(&input)?;
-            if !input_path.exists() {
-                input_path.set_extension("pcap");  
-            }
-            let output_path = match output {
-                Some(path) => path::absolute(&path)?,
-                None => input_path.with_added_extension("csv")
-            };
-            if !input_path.exists() {
-                error!("Input path does not exist: {}", input_path.display());
-                return Ok(());
-            }
+            let output = output.unwrap_or_else(|| input.with_added_extension("csv"));
+            let (input_path, input_file) = utils::try_open(input, "pcap")?;
+            let (output_path, output_file) = utils::try_create(output, "csv")?;
             info!("Dump {}[port={cap_port}] -> {}", input_path.display(), output_path.display());
-            dump::run(&input_path, &output_path, cap_port)?;
+            dump::dump(input_file, output_file, cap_port)?;
         }
-        Commands::Compare { c1, c2, client_map, port1, port2 } => {
-            let mut c1_path = path::absolute(&c1)?;
-            if !c1_path.exists() {
-                c1_path.set_extension("pcap");  
-            }
-            if !c1_path.exists() {
-                error!("First capture file does not exist: {}", c1_path.display());
-                return Ok(());
-            }
-            let mut c2_path = path::absolute(&c2)?;
-            if !c2_path.exists() {
-                c2_path.set_extension("pcap");  
-            }
-            if !c2_path.exists() {
-                error!("Second capture file does not exist: {}", c2_path.display());
-                return Ok(());
-            }
-            let map_path = path::absolute(&client_map)?;
-            if !map_path.exists() {
-                error!("Translations file does not exist: {}", map_path.display());
-                return Ok(());
-            }
+        Commands::Compare { c1, c2, addr_map, delta, port1, port2 } => {
+            let (c1_path, c1_file) = utils::try_open(c1, "pcap")?;
+            let (c2_path, c2_file) = utils::try_open(c2, "pcap")?;
+            let (map_path, map_file) = utils::try_open(addr_map, "csv")?;
             info!("Compare {}[{port1}] <=> {}[{port2}]", c1_path.display(), c2_path.display());
-            info!("Map file: {}", map_path.display());
-            let mut map = PairMap::new(map_path)?;
-            compare::normal::run(&mut map, c1, c2, port1, port2)?;
+            info!("Map: {}", map_path.display());
+            let mut map = PairMap::new(map_file)?;
+            let mut delta_file = None;
+            if let Some(delta) = delta {
+                let (delta_path, file) = utils::try_create(delta, "csv")?;
+                delta_file = Some(file);
+                info!("Deltas: {}", delta_path.display());
+            }
+            compare::compare(&mut map, c1_file, c2_file, port1, port2, delta_file)?;
         }
     }
     Ok(())

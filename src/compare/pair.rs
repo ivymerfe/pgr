@@ -3,7 +3,6 @@ use std::{
     fs::File,
     io::{BufRead, BufReader},
     net::SocketAddr,
-    path::Path,
 };
 
 use crate::compare::client::Client;
@@ -16,13 +15,13 @@ pub struct CompareStats {
     pub cnt_ahead: f64,
     pub sum_ahead: f64,
     pub max_ahead: f64,
-    pub total_updates: u64
+    pub total_updates: u64,
 }
 
 impl CompareStats {
     pub fn update_ts(&mut self, rel_ts1: u64, rel_ts2: u64) {
         self.total_updates += 1;
-        
+
         let rel_1 = rel_ts1 as f64;
         let rel_2 = rel_ts2 as f64;
         let delta = rel_2 - rel_1;
@@ -44,7 +43,6 @@ pub struct ComparePair {
     pub stats: CompareStats,
 }
 
-
 #[derive(Default)]
 pub struct PairMap {
     c1_to_c2: HashMap<SocketAddr, SocketAddr>,
@@ -53,8 +51,7 @@ pub struct PairMap {
 }
 
 impl PairMap {
-    pub fn new<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
-        let file = File::open(path)?;
+    pub fn new(file: File) -> Result<Self, Box<dyn std::error::Error>> {
         let reader = BufReader::new(file);
         let mut c1_to_c2 = HashMap::new();
         let mut c2_to_c1 = HashMap::new();
@@ -87,7 +84,7 @@ impl PairMap {
         self.clients.entry(c1_addr).or_insert_with(|| ComparePair {
             c1: Client::new(c1_addr),
             c2: Client::new(c2_addr),
-            stats: CompareStats::default()
+            stats: CompareStats::default(),
         })
     }
 

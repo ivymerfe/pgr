@@ -1,5 +1,4 @@
-use std::path::Path;
-use std::{error::Error, net::SocketAddr};
+use std::net::SocketAddr;
 use tokio::{fs::File, io::AsyncWriteExt};
 
 pub struct AddrMap {
@@ -7,9 +6,8 @@ pub struct AddrMap {
 }
 
 impl AddrMap {
-    pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn Error>> {
-        let file = File::create(path).await?;
-        Ok(Self { file })
+    pub fn new(file: File) -> Self {
+        Self { file }
     }
 
     pub async fn write(

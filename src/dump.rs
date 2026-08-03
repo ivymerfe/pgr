@@ -1,7 +1,7 @@
 use std::collections::HashMap;
+use std::fs::File;
 use std::io::BufWriter;
 use std::io::Write;
-use std::{fs::File, path::PathBuf};
 use tracing::warn;
 use tracing::{error, info};
 
@@ -11,13 +11,9 @@ use crate::parser::pcap::ReadState;
 use crate::parser::pq_stream::FrameResult;
 use crate::parser::pq_stream::PqStream;
 
-pub fn run(
-    input_path: &PathBuf,
-    output_path: &PathBuf,
-    cap_port: u16,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut capture_reader = CaptureReader::new(File::open(input_path)?)?;
-    let mut writer = BufWriter::with_capacity(131072, File::create(output_path)?);
+pub fn dump(input: File, output: File, cap_port: u16) -> Result<(), Box<dyn std::error::Error>> {
+    let mut capture_reader = CaptureReader::new(input)?;
+    let mut writer = BufWriter::with_capacity(131072, output);
 
     let mut streams = HashMap::new();
     let mut start_ts = 0;

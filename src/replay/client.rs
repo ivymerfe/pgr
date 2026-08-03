@@ -2,7 +2,6 @@ use std::{
     collections::HashMap,
     error::Error,
     net::{IpAddr, SocketAddr},
-    path::Path,
     sync::Arc,
     time::Duration,
 };
@@ -56,8 +55,8 @@ pub struct ReplayManager {
 }
 
 impl ReplayManager {
-    pub async fn new<P: AsRef<Path>>(
-        addr_map_path: P,
+    pub async fn new(
+        addr_map: AddrMap,
         host: String,
         port: u16,
         dbname: String,
@@ -65,7 +64,6 @@ impl ReplayManager {
         password: Option<String>,
     ) -> Result<Self, Box<dyn Error>> {
         let addr: IpAddr = host.parse()?;
-        let addr_map = AddrMap::new(addr_map_path).await?;
         let config = ReplayConfig {
             user: user,
             password: password.map(|s| s.as_bytes().to_vec()),
@@ -86,7 +84,7 @@ impl ReplayManager {
 
     pub async fn replay(
         &mut self,
-        input_path: std::path::PathBuf,
+        input: std::fs::File,
         cap_port: u16,
     ) -> Result<(), Box<dyn Error>> {
         let stats = self.info.stats.clone();
@@ -103,7 +101,7 @@ impl ReplayManager {
             }
         });
 
-        let mut capture_reader = CaptureReader::new(std::fs::File::open(input_path)?)?;
+        let mut capture_reader = CaptureReader::new(input)?;
 
         let mut wait = None;
         let mut tasks = JoinSet::new();
