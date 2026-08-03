@@ -1,7 +1,10 @@
 use std::error::Error;
 use std::path::{self, Path, PathBuf};
 
-pub fn try_open<P: AsRef<Path>>(path: P, ext: &str) -> Result<(PathBuf, std::fs::File), Box<dyn Error>> {
+pub fn try_open<P: AsRef<Path>>(
+    path: P,
+    ext: &str,
+) -> Result<(PathBuf, std::fs::File), Box<dyn Error>> {
     let mut abs_path = path::absolute(&path)?;
     if abs_path.extension().is_none() {
         abs_path.set_extension(ext);
@@ -17,7 +20,10 @@ pub fn try_open<P: AsRef<Path>>(path: P, ext: &str) -> Result<(PathBuf, std::fs:
     Ok((abs_path, file))
 }
 
-pub fn try_create<P: AsRef<Path>>(path: P, ext: &str) -> Result<(PathBuf, std::fs::File), Box<dyn Error>> {
+pub fn try_create<P: AsRef<Path>>(
+    path: P,
+    ext: &str,
+) -> Result<(PathBuf, std::fs::File), Box<dyn Error>> {
     let mut abs_path = path::absolute(&path)?;
     if abs_path.extension().is_none() {
         abs_path.set_extension(ext);
@@ -33,7 +39,7 @@ pub fn try_create<P: AsRef<Path>>(path: P, ext: &str) -> Result<(PathBuf, std::f
     Ok((abs_path, file))
 }
 
-pub async fn try_open_a<P: AsRef<Path>>(
+pub async fn try_create_a<P: AsRef<Path>>(
     path: P,
     ext: &str,
 ) -> Result<(PathBuf, tokio::fs::File), Box<dyn Error>> {
@@ -41,7 +47,7 @@ pub async fn try_open_a<P: AsRef<Path>>(
     if abs_path.extension().is_none() {
         abs_path.set_extension(ext);
     }
-    let file = tokio::fs::File::open(&abs_path).await.map_err(|err| {
+    let file = tokio::fs::File::create(&abs_path).await.map_err(|err| {
         format!(
             "Failed to open file: '{}'\n\
              ├─ OS Error: {}",

@@ -153,7 +153,7 @@ async fn main()-> Result<(), Box<dyn Error>> {
 async fn run_command(cli: Cli) -> Result<(), Box<dyn Error>> {
     match cli.command {
         Commands::Replay { input, cap_port, addr_map, host, port, dbname, user, pass } => {
-            let (map_path, map_file) = utils::try_open_a(addr_map, "csv").await?;
+            let (map_path, map_file) = utils::try_create_a(addr_map, "csv").await?;
             let (input_path, input_file) = utils::try_open(input, "pcap")?;
             info!("Replaying {}[port={cap_port}] at host={host} port={port} user={user}", input_path.display());
             info!("Map: {}", map_path.display());
