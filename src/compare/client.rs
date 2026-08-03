@@ -2,11 +2,10 @@ use std::{collections::VecDeque, net::SocketAddr};
 
 use tracing::info;
 
-use crate::parser::pq_stream::{ConnState, FrameInfo, FrameResult, PqStream};
+use crate::capture::frame_buffer::{ConnState, FrameBuffer, FrameInfo, FrameResult};
 
 pub struct Client {
     pub addr: SocketAddr,
-    pub stream: PqStream,
     pub connect_ts: u64,
     pub frame_count: u64,
     pending: VecDeque<(FrameInfo, u64)>,
@@ -16,32 +15,29 @@ impl Client {
     pub fn new(addr: SocketAddr) -> Self {
         Self {
             addr,
-            stream: PqStream::default(),
             connect_ts: 0,
             frame_count: 0,
             pending: VecDeque::new(),
         }
     }
 
-    pub fn read_stream(&mut self, ts: u64) {
+    pub fn read_buf(&mut self, ts: u64, buf: &mut FrameBuffer) {
         if self.connect_ts == 0 {
             self.connect_ts = ts;
         }
         loop {
-            match self.stream.find_frame() {
+            match buf.find_frame() {
                 FrameResult::Complete(info) => {
-                    if self.stream.state == ConnState::Normal
-                        || self.stream.state == ConnState::CopyIn
-                    {
+                    if buf.state == ConnState::Normal || buf.state == ConnState::CopyIn {
                         self.pending.push_back((info, ts));
                         self.frame_count += 1;
                     }
-                    self.stream.consume_frame(&info);
+                    buf.consume_frame(&info);
                 }
                 FrameResult::Incomplete => break,
                 FrameResult::Desync => {
                     info!("[{}] desync", self.addr);
-                    self.stream.resync();
+                    buf.resync();
                 }
             }
         }
@@ -51,14 +47,7 @@ impl Client {
         !self.pending.is_empty()
     }
 
-    pub fn get_frame(&self) -> (&FrameInfo, u64, &[u8]) {
-        let (info, ts) = &self.pending[0];
-        return (info, *ts, self.stream.read_frame(&info));
-    }
-
-    pub fn next_frame(&mut self) {
-        if let Some((info, _ts)) = self.pending.pop_front() {
-            self.stream.mark_read(info.stream_end);
-        }
+    pub fn pop_frame(&mut self) -> (FrameInfo, u64) {
+        return self.pending.pop_front().unwrap();
     }
 }

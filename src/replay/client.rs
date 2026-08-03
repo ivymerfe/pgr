@@ -15,9 +15,9 @@ use tokio::{
 use tracing::{error, info, warn};
 
 use crate::{
-    parser::{
+    capture::{
+        frame_buffer::{ConnState, FrameBuffer, FrameResult},
         pcap::{CaptureReader, ReadState},
-        pq_stream::{ConnState, FrameResult, PqStream},
     },
     replay::{
         addr_map::AddrMap,
@@ -42,7 +42,6 @@ struct ClientInfo {
 
 #[derive(Default)]
 struct ReplayClient {
-    stream: PqStream,
     sent_offset: usize,
     chan: Option<mpsc::UnboundedSender<ClientMessage>>,
     dead: bool,
@@ -101,25 +100,17 @@ impl ReplayManager {
             }
         });
 
-        let mut capture_reader = CaptureReader::new(input)?;
-
+        let mut reader = CaptureReader::new(input, cap_port)?;
         let mut wait = None;
         let mut tasks = JoinSet::new();
         loop {
-            match capture_reader.next() {
-                ReadState::Ok(packet) => {
-                    if packet.tcp.destination_port() != cap_port {
-                        continue;
+            match reader.next() {
+                ReadState::Ok { addr, ts, buf } => {
+                    let wait = wait.get_or_insert_with(|| WaitInfo::start(ts));
+                    if let Some(client) = self.ensure_client(addr, ts, &mut tasks, wait) {
+                        Self::update_client(client, addr, ts, buf);
                     }
-                    let wait = wait.get_or_insert_with(|| WaitInfo::start(packet.ts));
-                    if let Some(client) =
-                        self.ensure_client(packet.addr, packet.ts, &mut tasks, wait)
-                    {
-                        if client.stream.process_packet(packet.tcp) {
-                            Self::update_client(client, packet.addr, packet.ts);
-                        }
-                    }
-                    if wait.time_to(packet.ts) > 4_000_000 {
+                    if wait.time_to(ts) > 4_000_000 {
                         sleep(Duration::from_secs(3)).await;
                     }
                 }
@@ -167,25 +158,23 @@ impl ReplayManager {
         return Some(client);
     }
 
-    fn update_client(client: &mut ReplayClient, pcap_addr: SocketAddr, ts: u64) {
-        let stream = &mut client.stream;
-
-        while stream.state != ConnState::Normal && stream.state != ConnState::CopyIn {
-            match stream.find_frame() {
+    fn update_client(client: &mut ReplayClient, addr: SocketAddr, ts: u64, buf: &mut FrameBuffer) {
+        while buf.state != ConnState::Normal && buf.state != ConnState::CopyIn {
+            match buf.find_frame() {
                 FrameResult::Complete(info) => {
                     client.sent_offset = client.sent_offset.max(info.stream_end);
-                    stream.consume_frame(&info);
+                    buf.consume_frame(&info);
                 }
                 FrameResult::Incomplete => {
                     return;
                 }
                 FrameResult::Desync => {
-                    warn!("[{}] desync", pcap_addr);
-                    stream.resync();
+                    warn!("[{}] desync", addr);
+                    buf.resync();
                 }
             }
         }
-        if let Some(rem) = stream.read_remaining(client.sent_offset) {
+        if let Some(rem) = buf.read_remaining(client.sent_offset) {
             if let Some(chan) = &client.chan {
                 let msg = ClientMessage {
                     ts,
@@ -194,7 +183,7 @@ impl ReplayManager {
                 match chan.send(msg) {
                     Ok(()) => {
                         client.sent_offset += rem.len();
-                        stream.mark_read(client.sent_offset);
+                        buf.mark_read(client.sent_offset);
                     }
                     Err(_e) => {
                         info!("Removed client");

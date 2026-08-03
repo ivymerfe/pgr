@@ -1,13 +1,30 @@
 use etherparse::{InternetSlice, SlicedPacket, TcpSlice, TransportSlice};
 use pcap_parser::{traits::PcapReaderIterator, *};
-use std::{io::Read, net::SocketAddr};
+use std::{collections::HashMap, io::Read, net::SocketAddr};
+
+use crate::capture::{frame_buffer::FrameBuffer, tcp_handler::TcpHandler};
 
 pub enum ReadState<'a> {
-    Ok(TsPacket<'a>),
+    Ok {
+        addr: SocketAddr,
+        ts: u64,
+        buf: &'a mut FrameBuffer,
+    },
     Continue,
     Eof,
     RefillFail(String),
     ReadFail(String),
+}
+
+pub struct CaptureReader<'a> {
+    pcap: Box<dyn PcapReaderIterator + Send + 'a>,
+    port: u16,
+    consume: usize,
+    refill: bool,
+    pub handlers: HashMap<SocketAddr, TcpHandler>,
+    pub packet_count: usize,
+    pub bytes_read: usize,
+    pub fail_count: usize,
 }
 
 pub struct TsPacket<'a> {
@@ -16,23 +33,25 @@ pub struct TsPacket<'a> {
     pub tcp: TcpSlice<'a>,
 }
 
-pub struct CaptureReader<'a> {
-    pcap: Box<dyn PcapReaderIterator + Send + 'a>,
-    consume: usize,
-    refill: bool,
-    pub bytes_read: usize,
-    pub fail_count: usize,
-}
-
 impl<'a> CaptureReader<'a> {
-    pub fn new<R: Read + Send + 'a>(reader: R) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new<R: Read + Send + 'a>(
+        reader: R,
+        port: u16,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         Ok(Self {
             pcap: create_reader(131072, reader)?,
+            port,
             consume: 0,
             refill: false,
+            handlers: HashMap::new(),
+            packet_count: 0,
             bytes_read: 0,
-            fail_count: 0
+            fail_count: 0,
         })
+    }
+
+    pub fn get_buffer(&mut self, addr: SocketAddr) -> Option<&mut FrameBuffer> {
+        self.handlers.get_mut(&addr).map(|h| &mut h.buf)
     }
 
     pub fn next(&mut self) -> ReadState<'_> {
@@ -50,8 +69,16 @@ impl<'a> CaptureReader<'a> {
             Ok((consumed, block)) => {
                 self.bytes_read += consumed;
                 self.consume += consumed;
-                if let Some(packet) = process_block(block) {
-                    return ReadState::Ok(packet);
+                if let Some(packet) = process_block(block, self.port) {
+                    self.packet_count += 1;
+                    let handler = self.handlers.entry(packet.addr).or_default();
+                    if handler.process_packet(packet.tcp) {
+                        return ReadState::Ok {
+                            addr: packet.addr,
+                            ts: packet.ts,
+                            buf: &mut handler.buf,
+                        };
+                    }
                 } else {
                     self.fail_count += 1;
                 }
@@ -66,7 +93,7 @@ impl<'a> CaptureReader<'a> {
     }
 }
 
-pub fn process_block(block: PcapBlockOwned) -> Option<TsPacket> {
+pub fn process_block(block: PcapBlockOwned, port: u16) -> Option<TsPacket> {
     let (packet_data, ts) = match block {
         PcapBlockOwned::Legacy(p) => {
             let ts = (p.ts_sec as u64) * 1_000_000 + (p.ts_usec as u64);
@@ -83,7 +110,7 @@ pub fn process_block(block: PcapBlockOwned) -> Option<TsPacket> {
     };
     if !packet_data.is_empty() {
         if let Some(packet) = parse_packet(&packet_data) {
-            if let Some((addr, tcp)) = filter_packet(packet) {
+            if let Some((addr, tcp)) = filter_packet(packet, port) {
                 return Some(TsPacket { addr, ts, tcp });
             }
         }
@@ -91,18 +118,22 @@ pub fn process_block(block: PcapBlockOwned) -> Option<TsPacket> {
     return None;
 }
 
-fn filter_packet(packet: SlicedPacket) -> Option<(SocketAddr, TcpSlice)> {
-    let src_ip = match &packet.net {
-        Some(InternetSlice::Ipv4(ipv4)) => std::net::IpAddr::V4(ipv4.header().source_addr()),
-        Some(InternetSlice::Ipv6(ipv6)) => std::net::IpAddr::V6(ipv6.header().source_addr()),
-        _ => return None,
-    };
+fn filter_packet(packet: SlicedPacket, port: u16) -> Option<(SocketAddr, TcpSlice)> {
     if let Some(TransportSlice::Tcp(tcp)) = packet.transport {
+        if tcp.destination_port() != port {
+            return None;
+        }
+        let src_ip = match &packet.net {
+            Some(InternetSlice::Ipv4(ipv4)) => std::net::IpAddr::V4(ipv4.header().source_addr()),
+            Some(InternetSlice::Ipv6(ipv6)) => std::net::IpAddr::V6(ipv6.header().source_addr()),
+            _ => return None,
+        };
         let src_port = tcp.source_port();
         let addr = SocketAddr::new(src_ip, src_port);
-        return Some((addr, tcp));
+        Some((addr, tcp))
+    } else {
+        None
     }
-    None
 }
 
 fn parse_packet(packet_data: &'_ [u8]) -> Option<SlicedPacket<'_>> {

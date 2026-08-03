@@ -11,6 +11,7 @@ use crate::compare::pair::PairMap;
 use crate::replay::addr_map::AddrMap;
 use crate::replay::client::ReplayManager;
 
+mod capture;
 mod parser;
 mod dump;
 mod replay;

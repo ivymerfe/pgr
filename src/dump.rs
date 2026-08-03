@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufWriter;
 use std::io::Write;
@@ -6,47 +5,39 @@ use tracing::warn;
 use tracing::{error, info};
 
 use crate::parser::c2s_display::TagFrame;
-use crate::parser::pcap::CaptureReader;
-use crate::parser::pcap::ReadState;
-use crate::parser::pq_stream::FrameResult;
-use crate::parser::pq_stream::PqStream;
+use crate::capture::frame_buffer::FrameResult;
+use crate::capture::pcap::CaptureReader;
+use crate::capture::pcap::ReadState;
 
 pub fn dump(input: File, output: File, cap_port: u16) -> Result<(), Box<dyn std::error::Error>> {
-    let mut capture_reader = CaptureReader::new(input)?;
+    let mut reader = CaptureReader::new(input, cap_port)?;
     let mut writer = BufWriter::with_capacity(131072, output);
 
-    let mut streams = HashMap::new();
     let mut start_ts = 0;
     loop {
-        match capture_reader.next() {
-            ReadState::Ok(packet) => {
-                if packet.tcp.destination_port() != cap_port {
-                    continue;
-                }
+        match reader.next() {
+            ReadState::Ok { addr, ts, buf } => {
                 if start_ts == 0 {
-                    start_ts = packet.ts;
+                    start_ts = ts;
                 }
-                let stream: &mut PqStream = streams.entry(packet.addr).or_default();
-                if stream.process_packet(packet.tcp) {
-                    loop {
-                        match stream.find_frame() {
-                            FrameResult::Complete(info) => {
-                                let frame = stream.read_frame(&info);
-                                writeln!(
-                                    writer,
-                                    "{:.6},{},{}",
-                                    packet.ts.saturating_sub(start_ts) as f64 / 1e6,
-                                    packet.addr,
-                                    TagFrame(info.tag, frame)
-                                )?;
-                                stream.consume_frame(&info);
-                                stream.mark_read(info.stream_end);
-                            }
-                            FrameResult::Incomplete => break,
-                            FrameResult::Desync => {
-                                warn!("[{}] desync", packet.addr);
-                                stream.resync();
-                            }
+                loop {
+                    match buf.find_frame() {
+                        FrameResult::Complete(info) => {
+                            let frame = buf.read_frame(&info);
+                            writeln!(
+                                writer,
+                                "{:.6},{},{}",
+                                ts.saturating_sub(start_ts) as f64 / 1e6,
+                                addr,
+                                TagFrame(info.tag, frame)
+                            )?;
+                            buf.consume_frame(&info);
+                            buf.mark_read(info.stream_end);
+                        }
+                        FrameResult::Incomplete => break,
+                        FrameResult::Desync => {
+                            warn!("[{}] desync", addr);
+                            buf.resync();
                         }
                     }
                 }
@@ -63,8 +54,8 @@ pub fn dump(input: File, output: File, cap_port: u16) -> Result<(), Box<dyn std:
             }
         }
     }
-    info!("Ignored packets: {}", capture_reader.fail_count);
-    for (addr, stream) in &streams {
+    info!("Ignored packets: {}", reader.fail_count);
+    for (addr, stream) in &reader.handlers {
         info!(
             "{addr}: Packets = {} / Reorder = {}",
             stream.packet_count, stream.reorder_count

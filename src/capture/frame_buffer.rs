@@ -1,6 +1,3 @@
-use etherparse::TcpSlice;
-use std::collections::BTreeMap;
-
 const CLIENT_TAGS: &[u8] = b"QPBDECfcpSHX";
 const RESYNC_CHAIN_LEN: usize = 3;
 const SSL_REQUEST_CODE: u32 = 80877103;
@@ -21,17 +18,11 @@ impl Default for ConnState {
 }
 
 #[derive(Default)]
-pub struct PqStream {
+pub struct FrameBuffer {
     buf: Vec<u8>,
     buf_offset: usize,
-
     read_offset: usize,
     frame_offset: usize,
-
-    next_seq: Option<u32>,
-    reorder: BTreeMap<u32, Vec<u8>>,
-    pub packet_count: usize,
-    pub reorder_count: usize,
     pub state: ConnState,
 }
 
@@ -50,66 +41,16 @@ pub enum FrameResult {
     Desync,
 }
 
-impl PqStream {
-    pub fn set_isn(&mut self, syn_seq: u32) {
-        if self.next_seq.is_none() {
-            self.next_seq = Some(syn_seq.wrapping_add(1));
-        }
+impl FrameBuffer {
+    pub fn set_connected(&mut self) {
         if self.state == ConnState::Unknown {
             self.state = ConnState::AwaitingStartup;
             self.frame_offset = self.buf_offset + self.buf.len();
         }
     }
 
-    pub fn process_packet(&mut self, tcp: TcpSlice) -> bool {
-        let seq = tcp.sequence_number();
-        let effective_seq = if tcp.syn() {
-            self.set_isn(seq);
-            seq.wrapping_add(1)
-        } else {
-            seq
-        };
-        if self.ingest(effective_seq, tcp.payload()) {
-            self.packet_count += 1;
-            return true;
-        }
-        return false;
-    }
-
-    pub fn ingest(&mut self, seq: u32, payload: &[u8]) -> bool {
-        if payload.is_empty() {
-            return false;
-        }
-        let next = match self.next_seq {
-            None => {
-                self.next_seq = Some(seq);
-                seq
-            }
-            Some(n) => n,
-        };
-
-        let delta = seq.wrapping_sub(next) as i32;
-
-        if delta == 0 {
-            self.buf.extend_from_slice(payload);
-
-            let mut new_next = next.wrapping_add(payload.len() as u32);
-            while let Some(pending) = self.reorder.remove(&new_next) {
-                new_next = new_next.wrapping_add(pending.len() as u32);
-                self.buf.extend_from_slice(&pending);
-            }
-            self.next_seq = Some(new_next);
-            return true;
-        } else if delta < 0 {
-            let overlap = (-delta) as usize;
-            if overlap < payload.len() {
-                return self.ingest(next, &payload[overlap..]);
-            }
-        } else {
-            self.reorder_count += 1;
-            self.reorder.insert(seq, payload.to_vec());
-        }
-        return false;
+    pub fn extend(&mut self, data: &[u8]) {
+        self.buf.extend_from_slice(data);
     }
 
     fn compact_buffer(&mut self) {
@@ -171,10 +112,6 @@ impl PqStream {
     }
 
     pub fn consume_frame(&mut self, info: &FrameInfo) {
-        assert_eq!(
-            info.stream_start, self.frame_offset,
-            "consume_frame called with a stale/mismatched frame"
-        );
         self.frame_offset = info.stream_end;
 
         match self.state {
