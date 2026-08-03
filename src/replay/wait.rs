@@ -1,6 +1,8 @@
 use std::time::Duration;
 use tokio::time::{Instant, sleep};
 
+const SPIN_MARGIN: Duration = Duration::from_micros(1000);
+
 #[derive(Clone)]
 pub struct WaitInfo {
     start: Instant,
@@ -28,7 +30,6 @@ impl WaitInfo {
         }
 
         let dur = Duration::from_micros(delta as u64);
-        const SPIN_MARGIN: Duration = Duration::from_micros(1000);
         if dur > SPIN_MARGIN {
             sleep(dur - SPIN_MARGIN).await;
         }
