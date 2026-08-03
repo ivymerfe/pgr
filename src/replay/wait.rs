@@ -23,8 +23,24 @@ impl WaitInfo {
 
     pub async fn until(&mut self, target: u64) {
         let delta = self.time_to(target);
-        if delta > 0 {
-            sleep(Duration::from_micros(delta as u64)).await;
+        if delta <= 0 {
+            return;
         }
+
+        let dur = Duration::from_micros(delta as u64);
+        const SPIN_MARGIN: Duration = Duration::from_micros(1000);
+        if dur > SPIN_MARGIN {
+            sleep(dur - SPIN_MARGIN).await;
+        }
+        let deadline = self.start.into_std()
+            + Duration::from_micros((target.saturating_sub(self.pcap_ts)) as u64);
+
+        tokio::task::spawn_blocking(move || {
+            while std::time::Instant::now() < deadline {
+                std::hint::spin_loop();
+            }
+        })
+        .await
+        .unwrap();
     }
 }

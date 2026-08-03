@@ -40,10 +40,13 @@ struct ClientInfo {
     stats: Arc<ReplayStats>,
 }
 
-#[derive(Default)]
 struct ReplayClient {
-    sent_offset: usize,
+    addr: SocketAddr,
+    info: ClientInfo,
+    wait: WaitInfo,
+    first_ts: u64,
     chan: Option<mpsc::UnboundedSender<ClientMessage>>,
+    sent_offset: usize,
     dead: bool,
     connected: bool,
 }
@@ -107,8 +110,8 @@ impl ReplayManager {
             match reader.next() {
                 ReadState::Ok { addr, ts, buf } => {
                     let wait = wait.get_or_insert_with(|| WaitInfo::start(ts));
-                    if let Some(client) = self.ensure_client(addr, ts, &mut tasks, wait) {
-                        Self::update_client(client, addr, ts, buf);
+                    if let Some(client) = self.ensure_client(addr, ts, wait) {
+                        client.update(ts, buf, &mut tasks);
                     }
                     if wait.time_to(ts) > 4_000_000 {
                         sleep(Duration::from_secs(3)).await;
@@ -126,7 +129,9 @@ impl ReplayManager {
                 }
             }
         }
-        self.clients.clear();
+        for client in self.clients.values_mut() {
+            client.close();
+        }
         info!("Finished reading, waiting for clients");
         tasks.join_all().await;
         Ok(())
@@ -134,64 +139,90 @@ impl ReplayManager {
 
     fn ensure_client(
         &mut self,
-        pcap_addr: SocketAddr,
-        conn_ts: u64,
-        tasks: &mut JoinSet<()>,
-        wait: &WaitInfo,
+        addr: SocketAddr,
+        first_ts: u64,
+        wait: &mut WaitInfo,
     ) -> Option<&mut ReplayClient> {
-        let client = self.clients.entry(pcap_addr).or_default();
+        let client = self
+            .clients
+            .entry(addr)
+            .or_insert_with(|| ReplayClient::new(addr, self.info.clone(), wait.clone(), first_ts));
         if client.dead {
             return None;
         }
-        if !client.connected {
-            let (tx, rx) = mpsc::unbounded_channel();
-            client.chan = Some(tx);
-            tasks.spawn(client_proc(
-                pcap_addr,
-                self.info.clone(),
-                wait.clone(),
-                conn_ts,
-                rx,
-            ));
-            client.connected = true;
-        }
         return Some(client);
     }
+}
 
-    fn update_client(client: &mut ReplayClient, addr: SocketAddr, ts: u64, buf: &mut FrameBuffer) {
+impl ReplayClient {
+    pub fn new(addr: SocketAddr, info: ClientInfo, wait: WaitInfo, first_ts: u64) -> Self {
+        Self {
+            addr,
+            info,
+            wait,
+            first_ts,
+            chan: None,
+            sent_offset: 0,
+            connected: false,
+            dead: false,
+        }
+    }
+    pub fn update(&mut self, ts: u64, buf: &mut FrameBuffer, tasks: &mut JoinSet<()>) {
+        let mut conn_ts = 0;
         while buf.state != ConnState::Normal && buf.state != ConnState::CopyIn {
             match buf.find_frame() {
                 FrameResult::Complete(info) => {
-                    client.sent_offset = client.sent_offset.max(info.stream_end);
+                    if info.tag == 0 {
+                        // found startup -> wait for delay and skip startup frame
+                        // no startup -> connect immediately
+                        conn_ts = self.first_ts;
+                        self.sent_offset = self.sent_offset.max(info.stream_end);
+                    }
                     buf.consume_frame(&info);
                 }
                 FrameResult::Incomplete => {
                     return;
                 }
                 FrameResult::Desync => {
-                    warn!("[{}] desync", addr);
+                    warn!("[{}] desync", self.addr);
                     buf.resync();
                 }
             }
         }
-        if let Some(rem) = buf.read_remaining(client.sent_offset) {
-            if let Some(chan) = &client.chan {
+        if !self.connected {
+            let (tx, rx) = mpsc::unbounded_channel();
+            self.chan = Some(tx);
+            tasks.spawn(client_proc(
+                self.addr,
+                self.info.clone(),
+                self.wait.clone(),
+                conn_ts,
+                rx,
+            ));
+            self.connected = true;
+        }
+        if let Some(rem) = buf.read_remaining(self.sent_offset) {
+            if let Some(chan) = &self.chan {
                 let msg = ClientMessage {
                     ts,
                     buf: rem.to_vec(),
                 };
                 match chan.send(msg) {
                     Ok(()) => {
-                        client.sent_offset += rem.len();
-                        buf.mark_read(client.sent_offset);
+                        self.sent_offset += rem.len();
+                        buf.mark_read(self.sent_offset);
                     }
                     Err(_e) => {
-                        info!("Removed client");
-                        client.dead = true;
+                        info!("[{}] removed", self.addr);
+                        self.dead = true;
                     }
                 }
             }
         }
+    }
+
+    pub fn close(&mut self) {
+        self.chan = None
     }
 }
 
@@ -227,12 +258,13 @@ async fn client_proc(
 
     let (mut read, mut write) = socket.stream.into_split();
     let read_stats = info.stats.clone();
-    let read_handle = tokio::spawn(async move {
+    let mut read_handle = tokio::spawn(async move {
         let mut chunk = [0u8; 65536];
         loop {
             match read.read(&mut chunk).await {
                 Ok(sz) => {
                     if sz == 0 {
+                        // close rx?
                         break;
                     }
                     read_stats.log_recv(sz);
@@ -243,17 +275,26 @@ async fn client_proc(
             }
         }
     });
-    while let Some(msg) = rx.recv().await {
-        wait.until(msg.ts).await;
-        if let Err(e) = write.write_all(&msg.buf).await {
-            error!("[{me}] send failed: {e}");
-            break;
+    let write_loop = async {
+        while let Some(msg) = rx.recv().await {
+            wait.until(msg.ts).await;
+            if let Err(e) = write.write_all(&msg.buf).await {
+                error!("[{me}] send failed: {e}");
+                break;
+            }
+            info.stats.log_send();
         }
-        info.stats.log_send();
-    }
-    match read_handle.await {
-        Ok(()) => (),
-        Err(e) => error!("[{}] wait error: {}", me, e),
     };
+    tokio::select! {
+        _ = write_loop => {
+            read_handle.abort();
+        }
+        res = &mut read_handle => {
+            match res {
+                Ok(()) => (),
+                Err(e) => error!("[{}] read task error: {}", me, e),
+            }
+        }
+    }
     info!("[{}] Disconnected", me);
 }
