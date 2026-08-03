@@ -4,19 +4,21 @@ use std::io::Write;
 use tracing::warn;
 use tracing::{error, info};
 
-use crate::parser::c2s_display::TagFrame;
 use crate::capture::frame_buffer::FrameResult;
-use crate::capture::pcap::CaptureReader;
-use crate::capture::pcap::ReadState;
+use crate::capture::reader::CaptureReader;
+use crate::capture::reader::ReadResult;
+use crate::parser::c2s_display::TagFrame;
 
-pub fn dump(input: File, output: File, cap_port: u16) -> Result<(), Box<dyn std::error::Error>> {
-    let mut reader = CaptureReader::new(input, cap_port)?;
+pub fn dump(
+    mut reader: Box<dyn CaptureReader>,
+    output: File,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut writer = BufWriter::with_capacity(131072, output);
 
     let mut start_ts = 0;
     loop {
         match reader.next() {
-            ReadState::Ok { addr, ts, buf } => {
+            ReadResult::Ok { addr, ts, buf } => {
                 if start_ts == 0 {
                     start_ts = ts;
                 }
@@ -36,30 +38,19 @@ pub fn dump(input: File, output: File, cap_port: u16) -> Result<(), Box<dyn std:
                         }
                         FrameResult::Incomplete => break,
                         FrameResult::Desync => {
-                            warn!("[{}] desync", addr);
+                            warn!("[{addr}] desync");
                             buf.resync();
                         }
                     }
                 }
             }
-            ReadState::Continue => continue,
-            ReadState::Eof => break,
-            ReadState::ReadFail(e) => {
-                error!("Failed to read pcap: {e}");
-                break;
-            }
-            ReadState::RefillFail(e) => {
-                error!("Failed to refill pcap: {e}");
+            ReadResult::Continue => continue,
+            ReadResult::Eof => break,
+            ReadResult::Error(e) => {
+                error!("Failed to read capture: {e}");
                 break;
             }
         }
-    }
-    info!("Ignored packets: {}", reader.fail_count);
-    for (addr, stream) in &reader.handlers {
-        info!(
-            "{addr}: Packets = {} / Reorder = {}",
-            stream.packet_count, stream.reorder_count
-        );
     }
     info!("Done");
     Ok(())

@@ -2,21 +2,13 @@ use etherparse::{InternetSlice, SlicedPacket, TcpSlice, TransportSlice};
 use pcap_parser::{traits::PcapReaderIterator, *};
 use std::{collections::HashMap, io::Read, net::SocketAddr};
 
-use crate::capture::{frame_buffer::FrameBuffer, tcp_handler::TcpHandler};
+use crate::capture::{
+    frame_buffer::FrameBuffer,
+    reader::{CaptureReader, ReadResult},
+    tcp_handler::TcpHandler,
+};
 
-pub enum ReadState<'a> {
-    Ok {
-        addr: SocketAddr,
-        ts: u64,
-        buf: &'a mut FrameBuffer,
-    },
-    Continue,
-    Eof,
-    RefillFail(String),
-    ReadFail(String),
-}
-
-pub struct CaptureReader<'a> {
+pub struct PcapReader<'a> {
     pcap: Box<dyn PcapReaderIterator + Send + 'a>,
     port: u16,
     consume: usize,
@@ -33,7 +25,7 @@ pub struct TsPacket<'a> {
     pub tcp: TcpSlice<'a>,
 }
 
-impl<'a> CaptureReader<'a> {
+impl<'a> PcapReader<'a> {
     pub fn new<R: Read + Send + 'a>(
         reader: R,
         port: u16,
@@ -49,19 +41,21 @@ impl<'a> CaptureReader<'a> {
             fail_count: 0,
         })
     }
+}
 
-    pub fn get_buffer(&mut self, addr: SocketAddr) -> Option<&mut FrameBuffer> {
+impl<'a> CaptureReader for PcapReader<'a> {
+    fn get_buffer(&mut self, addr: SocketAddr) -> Option<&mut FrameBuffer> {
         self.handlers.get_mut(&addr).map(|h| &mut h.buf)
     }
 
-    pub fn next(&mut self) -> ReadState<'_> {
+    fn next(&mut self) -> ReadResult<'_> {
         if self.consume > 0 {
             self.pcap.consume_noshift(self.consume);
             self.consume = 0;
         }
         if self.refill {
             if let Err(e) = self.pcap.refill() {
-                return ReadState::RefillFail(e.to_string());
+                return ReadResult::Error(e.to_string());
             }
             self.refill = false;
         }
@@ -73,7 +67,7 @@ impl<'a> CaptureReader<'a> {
                     self.packet_count += 1;
                     let handler = self.handlers.entry(packet.addr).or_default();
                     if handler.process_packet(packet.tcp) {
-                        return ReadState::Ok {
+                        return ReadResult::Ok {
                             addr: packet.addr,
                             ts: packet.ts,
                             buf: &mut handler.buf,
@@ -83,13 +77,13 @@ impl<'a> CaptureReader<'a> {
                     self.fail_count += 1;
                 }
             }
-            Err(PcapError::Eof) => return ReadState::Eof,
+            Err(PcapError::Eof) => return ReadResult::Eof,
             Err(PcapError::Incomplete(_sz)) => {
                 self.refill = true;
             }
-            Err(e) => return ReadState::ReadFail(e.to_string()),
+            Err(e) => return ReadResult::Error(e.to_string()),
         }
-        return ReadState::Continue;
+        return ReadResult::Continue;
     }
 }
 

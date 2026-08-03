@@ -10,25 +10,19 @@ use std::net::SocketAddr;
 
 use tracing::{error, info, warn};
 
-use crate::compare::pair::{ComparePair, PairMap};
-use crate::parser::c2s_display::TagFrame;
 use crate::capture::frame_buffer::FrameBuffer;
 use crate::capture::frame_buffer::FrameInfo;
-use crate::capture::pcap::{CaptureReader, ReadState};
+use crate::capture::reader::CaptureReader;
+use crate::capture::reader::ReadResult;
+use crate::compare::pair::{ComparePair, PairMap};
+use crate::parser::c2s_display::TagFrame;
 
 pub fn compare(
     map: &mut PairMap,
-    file1: File,
-    file2: File,
-    port1: u16,
-    port2: u16,
+    mut c1_reader: Box<dyn CaptureReader>,
+    mut c2_reader: Box<dyn CaptureReader>,
     delta_file: Option<File>,
 ) -> Result<(), Box<dyn Error>> {
-    let meta1 = file1.metadata()?;
-    let meta2 = file2.metadata()?;
-
-    let mut c1_reader = CaptureReader::new(file1, port1)?;
-    let mut c2_reader = CaptureReader::new(file2, port2)?;
     let mut delta_writer = delta_file.map(|f| BufWriter::new(f));
 
     let (mut c1_eof, mut c2_eof) = (false, false);
@@ -40,7 +34,7 @@ pub fn compare(
     while !c1_eof || !c2_eof {
         if !c1_eof {
             match c1_reader.next() {
-                ReadState::Ok {
+                ReadResult::Ok {
                     addr,
                     ts,
                     buf: buf1,
@@ -61,23 +55,19 @@ pub fn compare(
                         c1_ignore.insert(addr);
                     }
                 }
-                ReadState::Continue => (),
-                ReadState::Eof => {
+                ReadResult::Continue => (),
+                ReadResult::Eof => {
                     c1_eof = true;
                 }
-                ReadState::ReadFail(e) => {
+                ReadResult::Error(e) => {
                     error!("Failed to read capture1: {e}");
-                    return Ok(());
-                }
-                ReadState::RefillFail(e) => {
-                    error!("Failed to refill capture1: {e}");
                     return Ok(());
                 }
             }
         }
         if !c2_eof {
             match c2_reader.next() {
-                ReadState::Ok {
+                ReadResult::Ok {
                     addr,
                     ts,
                     buf: buf2,
@@ -98,33 +88,17 @@ pub fn compare(
                         c2_ignore.insert(addr);
                     }
                 }
-                ReadState::Continue => (),
-                ReadState::Eof => {
+                ReadResult::Continue => (),
+                ReadResult::Eof => {
                     c2_eof = true;
                 }
-                ReadState::ReadFail(e) => {
+                ReadResult::Error(e) => {
                     error!("Failed to read capture2: {e}");
-                    return Ok(());
-                }
-                ReadState::RefillFail(e) => {
-                    error!("Failed to refill capture2: {e}");
                     return Ok(());
                 }
             }
         }
     }
-    info!(
-        "C1: {} packets, {}/{} bytes",
-        c1_reader.packet_count,
-        c1_reader.bytes_read,
-        meta1.len()
-    );
-    info!(
-        "C2: {} packets, {}/{} bytes",
-        c2_reader.packet_count,
-        c2_reader.bytes_read,
-        meta2.len()
-    );
     analyze(map, c1_first_ts, c2_first_ts);
     Ok(())
 }

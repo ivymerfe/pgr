@@ -42,7 +42,10 @@ impl ReplayConnection {
             let msg = client.next_message().await?;
             match msg {
                 BackendMessage::Authentication(auth) => client.handle_auth(auth).await?,
-                BackendMessage::ParameterStatus { _name: _, _value: _ } => {
+                BackendMessage::ParameterStatus {
+                    _name: _,
+                    _value: _,
+                } => {
                     // parameters.insert(name, value);
                 }
                 BackendMessage::BackendKeyData { _pid: _, .. } => {
@@ -199,17 +202,26 @@ fn try_parse(src: &mut BytesMut) -> Option<BackendMessage> {
         b'S' => {
             let name = read_cstr(&mut frame);
             let value = read_cstr(&mut frame);
-            BackendMessage::ParameterStatus { _name: name, _value: value }
+            BackendMessage::ParameterStatus {
+                _name: name,
+                _value: value,
+            }
         }
         b'K' => {
             let pid = frame.get_i32();
             let secret = frame.get_i32();
-            BackendMessage::BackendKeyData { _pid: pid, _secret: secret }
+            BackendMessage::BackendKeyData {
+                _pid: pid,
+                _secret: secret,
+            }
         }
         b'Z' => BackendMessage::ReadyForQuery,
         b'E' => BackendMessage::ErrorResponse(read_cstr(&mut frame)),
         b'N' => BackendMessage::NoticeResponse,
-        other => BackendMessage::Other { _tag: other, _frame: frame },
+        other => BackendMessage::Other {
+            _tag: other,
+            _frame: frame,
+        },
     })
 }
 

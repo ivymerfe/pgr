@@ -1,14 +1,8 @@
 use std::error::Error;
 use std::path::{self, Path, PathBuf};
 
-pub fn try_open<P: AsRef<Path>>(
-    path: P,
-    ext: &str,
-) -> Result<(PathBuf, std::fs::File), Box<dyn Error>> {
-    let mut abs_path = path::absolute(&path)?;
-    if abs_path.extension().is_none() {
-        abs_path.set_extension(ext);
-    }
+pub fn try_open<P: AsRef<Path>>(path: P) -> Result<(PathBuf, std::fs::File), Box<dyn Error>> {
+    let abs_path = path::absolute(&path)?;
     let file = std::fs::File::open(&abs_path).map_err(|err| {
         format!(
             "Failed to open file: '{}'\n\

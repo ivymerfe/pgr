@@ -17,7 +17,7 @@ use tracing::{error, info, warn};
 use crate::{
     capture::{
         frame_buffer::{ConnState, FrameBuffer, FrameResult},
-        pcap::{CaptureReader, ReadState},
+        reader::{CaptureReader, ReadResult},
     },
     replay::{
         addr_map::AddrMap,
@@ -86,8 +86,7 @@ impl ReplayManager {
 
     pub async fn replay(
         &mut self,
-        input: std::fs::File,
-        cap_port: u16,
+        mut reader: Box<dyn CaptureReader>,
     ) -> Result<(), Box<dyn Error>> {
         let stats = self.info.stats.clone();
         tokio::spawn(async move {
@@ -103,12 +102,11 @@ impl ReplayManager {
             }
         });
 
-        let mut reader = CaptureReader::new(input, cap_port)?;
         let mut wait = None;
         let mut tasks = JoinSet::new();
         loop {
             match reader.next() {
-                ReadState::Ok { addr, ts, buf } => {
+                ReadResult::Ok { addr, ts, buf } => {
                     let wait = wait.get_or_insert_with(|| WaitInfo::start(ts));
                     if let Some(client) = self.ensure_client(addr, ts, wait) {
                         client.update(ts, buf, &mut tasks);
@@ -117,14 +115,10 @@ impl ReplayManager {
                         sleep(Duration::from_secs(3)).await;
                     }
                 }
-                ReadState::Continue => (),
-                ReadState::Eof => break,
-                ReadState::ReadFail(e) => {
+                ReadResult::Continue => (),
+                ReadResult::Eof => break,
+                ReadResult::Error(e) => {
                     error!("Failed to read pcap: {e}");
-                    break;
-                }
-                ReadState::RefillFail(e) => {
-                    error!("Failed to refill pcap: {e}");
                     break;
                 }
             }
@@ -264,13 +258,12 @@ async fn client_proc(
             match read.read(&mut chunk).await {
                 Ok(sz) => {
                     if sz == 0 {
-                        // close rx?
                         break;
                     }
                     read_stats.log_recv(sz);
                 }
                 Err(e) => {
-                    error!("[{}] read error: {}", me, e);
+                    error!("[{me}] read error: {e}");
                 }
             }
         }
@@ -292,9 +285,9 @@ async fn client_proc(
         res = &mut read_handle => {
             match res {
                 Ok(()) => (),
-                Err(e) => error!("[{}] read task error: {}", me, e),
+                Err(e) => error!("[{me}] read task error: {e}"),
             }
         }
     }
-    info!("[{}] Disconnected", me);
+    info!("[{me}] Disconnected");
 }

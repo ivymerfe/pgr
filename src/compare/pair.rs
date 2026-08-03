@@ -63,8 +63,8 @@ impl PairMap {
                 continue;
             }
             let mut parts = trimmed.split(",");
-            let left_str = parts.next().ok_or("Missing left SocketAddr")?.trim();
-            let right_str = parts.next().ok_or("Missing right SocketAddr")?.trim();
+            let left_str = parts.next().ok_or("Missing left addr")?.trim();
+            let right_str = parts.next().ok_or("Missing right addr")?.trim();
 
             let addr_1: SocketAddr = left_str.parse()?;
             let addr_2: SocketAddr = right_str.parse()?;

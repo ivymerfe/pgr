@@ -3,7 +3,16 @@ name = "pgr"
 version = "0.1.0"
 edition = "2024"
 
+[workspace]
+members = [
+    ".",
+    "ebpf",
+    "common",
+]
+
 [dependencies]
+aya = "0.14.0"
+common = { path = "common", features = ["user"] }
 bytes = "1.12.1"
 clap = { version = "4.6.4", features = ["derive"] }
 etherparse = "0.21.0"
@@ -13,3 +22,6 @@ time = { version = "0.3.54", features = ["formatting", "macros", "local-offset"]
 tokio = { version = "1.53.0", features = ["full"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["fmt", "time"] }
+zstd = "0.13.3"
+crossbeam-channel = "0.5.16"
+libc = "0.2.189"
