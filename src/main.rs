@@ -1,5 +1,4 @@
 use clap::{Parser, Subcommand};
-use crossbeam_channel::RecvError;
 use std::env;
 use std::error::Error;
 use std::net::IpAddr;
@@ -11,7 +10,7 @@ use tracing::{error, info};
 
 use crate::capture::pcap::PcapReader;
 use crate::capture::reader::CaptureReader;
-use crate::capture::zcap::{ZcapReader, ZcapWriter};
+use crate::capture::zcap::ZcapReader;
 use crate::compare::pair::PairMap;
 use crate::replay::addr_map::AddrMap;
 use crate::replay::client::ReplayManager;
@@ -23,6 +22,7 @@ mod dump;
 mod parser;
 mod replay;
 mod utils;
+mod zstd_test;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None, arg_required_else_help = true, disable_help_flag = true)]
@@ -96,6 +96,25 @@ enum Commands {
 
         #[arg(short, long, default_value_t = 5432, value_parser = clap::value_parser!(u16).range(1..))]
         port: u16,
+
+        #[arg(short, long, default_value_t = 3, help = "Compression level")]
+        level: i32,
+
+        #[arg(long, default_value_t = 4, help = "Number of zstd workers")]
+        zw: u8,
+    },
+    Compress {
+        #[arg()]
+        input: PathBuf,
+
+        #[arg()]
+        output: PathBuf,
+
+        #[arg(short, long, default_value_t = 3, help = "Compression level")]
+        level: i32,
+
+        #[arg(long, default_value_t = 4, help = "Number of zstd workers")]
+        zw: u8,
     },
 }
 
@@ -189,33 +208,31 @@ async fn run_command(cli: Cli) -> Result<(), Box<dyn Error>> {
             output,
             iface,
             port,
+            level,
+            zw,
         } => {
             let (out_path, out_file) = files::try_create(output, "zcap")?;
             info!("Capturing into {}", out_path.display());
-            let mut writer = ZcapWriter::new(out_file)?;
+            info!("Compression level = {level}, workers = {zw}");
             let dst_ip: IpAddr = "::1".parse()?;
-            let (handle, rx) = capture::ebpf::start_capture(&iface, dst_ip, port).await?;
-            info!("Capture started");
-            let writer_handle = tokio::task::spawn_blocking(move || {
-                loop {
-                    match rx.recv() {
-                        Ok(event) => {
-                            if let Err(e) = writer.write_event(event) {
-                                error!("Failed to write event: {e}");
-                                break;
-                            }
-                        }
-                        Err(RecvError) => break,
-                    }
-                }
-                if let Err(e) = writer.finish() {
-                    error!("Writer finish failed: {e}");
-                }
-            });
-            tokio::signal::ctrl_c().await?;
-            handle.token.cancel();
-            drop(handle.ebpf);
-            writer_handle.await?;
+            capture::run_capture(out_file, &iface, dst_ip, port, level, zw).await?
+        }
+        Commands::Compress {
+            input,
+            output,
+            level,
+            zw,
+        } => {
+            let (in_path, in_file) = files::try_open(input)?;
+            let (out_path, out_file) = files::try_create(output, "zst")?;
+            info!(
+                "Compressing {} -> {}",
+                in_path.display(),
+                out_path.display()
+            );
+            info!("Level = {level}, workers = {zw}");
+            let dur = zstd_test::compress(in_file, out_file, level, zw)?;
+            info!("Time taken: {}ms", dur.as_millis());
         }
     }
     Ok(())

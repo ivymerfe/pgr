@@ -6,21 +6,25 @@ use crate::capture::{
 use std::{
     collections::HashMap,
     fs::File,
-    io::{self, BufReader, Read, Seek, SeekFrom, Take, Write},
+    io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Take, Write},
     net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
 };
 use zstd::{Decoder, Encoder, zstd_safe::CParameter};
 
 pub struct ZcapWriter<'a> {
-    encoder: Encoder<'a, File>,
+    encoder: Encoder<'a, BufWriter<File>>,
     addr_ids: HashMap<SocketAddr, u32>,
     addrs_by_id: Vec<SocketAddr>,
 }
 
 impl<'a> ZcapWriter<'a> {
-    pub fn new(out_file: File) -> Result<Self, io::Error> {
-        let mut encoder = Encoder::new(out_file, 3)?;
-        encoder.set_parameter(CParameter::NbWorkers(4))?;
+    pub fn new(
+        out_file: File,
+        compression_level: i32,
+        worker_count: u8,
+    ) -> Result<Self, io::Error> {
+        let mut encoder = Encoder::new(BufWriter::new(out_file), compression_level)?;
+        encoder.set_parameter(CParameter::NbWorkers(worker_count as u32))?;
         Ok(Self {
             encoder,
             addr_ids: HashMap::new(),
@@ -74,7 +78,7 @@ pub struct ZcapReader<'a> {
     addrs: Vec<SocketAddr>,
     payload_buf: Vec<u8>,
     buffers: HashMap<SocketAddr, FrameBuffer>,
-    first_ts: u64
+    first_ts: u64,
 }
 
 impl<'a> ZcapReader<'a> {
@@ -108,7 +112,7 @@ impl<'a> ZcapReader<'a> {
             addrs,
             payload_buf: Vec::new(),
             buffers: HashMap::new(),
-            first_ts: 0
+            first_ts: 0,
         })
     }
 
