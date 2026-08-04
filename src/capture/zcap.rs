@@ -9,7 +9,7 @@ use std::{
     io::{self, BufReader, Read, Seek, SeekFrom, Take, Write},
     net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
 };
-use zstd::{Decoder, Encoder};
+use zstd::{Decoder, Encoder, zstd_safe::CParameter};
 
 pub struct ZcapWriter<'a> {
     encoder: Encoder<'a, File>,
@@ -19,8 +19,10 @@ pub struct ZcapWriter<'a> {
 
 impl<'a> ZcapWriter<'a> {
     pub fn new(out_file: File) -> Result<Self, io::Error> {
+        let mut encoder = Encoder::new(out_file, 3)?;
+        encoder.set_parameter(CParameter::NbWorkers(4))?;
         Ok(Self {
-            encoder: Encoder::new(out_file, 3)?,
+            encoder,
             addr_ids: HashMap::new(),
             addrs_by_id: Vec::new(),
         })
@@ -57,9 +59,13 @@ impl<'a> ZcapWriter<'a> {
 
 fn write_wire_event<W: Write>(w: &mut W, id: u32, ev: &WireEvent) -> io::Result<()> {
     w.write_all(&id.to_le_bytes())?;
-    w.write_all(&ev.relative_ts_us.to_le_bytes())?;
-    w.write_all(&ev.len.to_le_bytes())?;
-    w.write_all(&ev.payload)?;
+    w.write_all(&ev.ts.to_le_bytes())?;
+    let data = &ev.data;
+    let len = data.len() as u32;
+    w.write_all(&len.to_le_bytes())?;
+    if len > 0 {
+        w.write_all(&ev.data)?;
+    }
     Ok(())
 }
 
@@ -68,6 +74,7 @@ pub struct ZcapReader<'a> {
     addrs: Vec<SocketAddr>,
     payload_buf: Vec<u8>,
     buffers: HashMap<SocketAddr, FrameBuffer>,
+    first_ts: u64
 }
 
 impl<'a> ZcapReader<'a> {
@@ -101,6 +108,7 @@ impl<'a> ZcapReader<'a> {
             addrs,
             payload_buf: Vec::new(),
             buffers: HashMap::new(),
+            first_ts: 0
         })
     }
 
@@ -118,8 +126,13 @@ impl<'a> ZcapReader<'a> {
         let payload_len = u32::from_le_bytes(len_buf) as usize;
 
         self.payload_buf.resize(payload_len, 0);
-        self.decoder.read_exact(&mut self.payload_buf)?;
-        Ok((id, ts))
+        if payload_len > 0 {
+            self.decoder.read_exact(&mut self.payload_buf)?;
+        }
+        if self.first_ts == 0 {
+            self.first_ts = ts;
+        }
+        Ok((id, ts.saturating_sub(self.first_ts)))
     }
 }
 
@@ -135,12 +148,16 @@ impl<'a> CaptureReader for ZcapReader<'a> {
             Err(e) => return Err(e.into()),
         };
         if let Some(addr) = self.addrs.get(id as usize) {
-            let frame_buffer = self.buffers.entry(*addr).or_default();
-            frame_buffer.extend(&self.payload_buf);
+            let fb = self.buffers.entry(*addr).or_default();
+            if self.payload_buf.len() == 0 {
+                fb.mark_connection_start();
+            } else {
+                fb.extend(&self.payload_buf);
+            }
             return Ok(ReadData {
                 addr: addr.clone(),
                 ts,
-                buf: frame_buffer,
+                buf: fb,
             });
         }
         Err(ReadError::Error(format!("Unknown id: {}", id)))
@@ -185,9 +202,9 @@ fn deserialize_map(mut data: &[u8]) -> io::Result<Vec<SocketAddr>> {
                 let port = u16::from_le_bytes(port);
                 addrs.push(SocketAddr::V6(SocketAddrV6::new(
                     Ipv6Addr::from(ip),
+                    port,
                     0,
                     0,
-                    port as u32,
                 )));
             }
             _ => {

@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use crossbeam_channel::RecvError;
 use std::env;
 use std::error::Error;
 use std::net::IpAddr;
@@ -193,18 +194,18 @@ async fn run_command(cli: Cli) -> Result<(), Box<dyn Error>> {
             info!("Capturing into {}", out_path.display());
             let mut writer = ZcapWriter::new(out_file)?;
             let dst_ip: IpAddr = "::1".parse()?;
-            let (handle, mut rx) = capture::ebpf::start_capture(&iface, dst_ip, port).await?;
+            let (handle, rx) = capture::ebpf::start_capture(&iface, dst_ip, port).await?;
             info!("Capture started");
-            let writer_handle = tokio::spawn(async move {
+            let writer_handle = tokio::task::spawn_blocking(move || {
                 loop {
-                    match rx.recv().await {
-                        Some(event) => {
+                    match rx.recv() {
+                        Ok(event) => {
                             if let Err(e) = writer.write_event(event) {
                                 error!("Failed to write event: {e}");
                                 break;
                             }
                         }
-                        None => break,
+                        Err(RecvError) => break,
                     }
                 }
                 if let Err(e) = writer.finish() {

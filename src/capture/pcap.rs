@@ -5,15 +5,21 @@ use std::{collections::HashMap, io::Read, net::SocketAddr};
 use crate::capture::{
     frame_buffer::FrameBuffer,
     reader::{CaptureReader, ReadData, ReadError, ReadResult},
-    tcp_handler::TcpHandler,
+    reassembler::Reassembler,
 };
+
+#[derive(Default)]
+struct PcapClient {
+    re: Reassembler,
+    fb: FrameBuffer,
+}
 
 pub struct PcapReader<'a> {
     pcap: Box<dyn PcapReaderIterator + Send + 'a>,
     port: u16,
     consume: usize,
     refill: bool,
-    pub handlers: HashMap<SocketAddr, TcpHandler>,
+    handlers: HashMap<SocketAddr, PcapClient>,
     pub first_ts: u64,
     pub packet_count: usize,
     pub bytes_read: usize,
@@ -53,7 +59,7 @@ impl From<PcapError<&[u8]>> for ReadError {
 
 impl<'a> CaptureReader for PcapReader<'a> {
     fn get_buffer(&mut self, addr: SocketAddr) -> Option<&mut FrameBuffer> {
-        self.handlers.get_mut(&addr).map(|h| &mut h.buf)
+        self.handlers.get_mut(&addr).map(|h| &mut h.fb)
     }
 
     fn next(&mut self) -> ReadResult<'_> {
@@ -74,12 +80,22 @@ impl<'a> CaptureReader for PcapReader<'a> {
                     if self.first_ts == 0 {
                         self.first_ts = packet.ts;
                     }
-                    let handler = self.handlers.entry(packet.addr).or_default();
-                    if handler.process_packet(packet.tcp) {
+                    let client = self.handlers.entry(packet.addr).or_default();
+                    let tcp = packet.tcp;
+                    let fb = &mut client.fb;
+                    if tcp.syn() {
+                        fb.mark_connection_start();
+                    }
+                    if client.re.feed(
+                        tcp.sequence_number(),
+                        tcp.syn(),
+                        tcp.payload(),
+                        &mut fb.data,
+                    ) {
                         return Ok(ReadData {
                             addr: packet.addr,
                             ts: packet.ts.saturating_sub(self.first_ts),
-                            buf: &mut handler.buf,
+                            buf: fb,
                         });
                     }
                 } else {

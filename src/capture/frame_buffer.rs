@@ -19,11 +19,11 @@ impl Default for ConnState {
 
 #[derive(Default)]
 pub struct FrameBuffer {
-    buf: Vec<u8>,
+    pub data: Vec<u8>,
+    pub state: ConnState,
     buf_offset: usize,
     read_offset: usize,
     frame_offset: usize,
-    pub state: ConnState,
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -42,21 +42,21 @@ pub enum FrameResult {
 }
 
 impl FrameBuffer {
-    pub fn set_connected(&mut self) {
+    pub fn mark_connection_start(&mut self) {
         if self.state == ConnState::Unknown {
             self.state = ConnState::AwaitingStartup;
-            self.frame_offset = self.buf_offset + self.buf.len();
+            self.frame_offset = self.buf_offset + self.data.len();
         }
     }
 
     pub fn extend(&mut self, data: &[u8]) {
-        self.buf.extend_from_slice(data);
+        self.data.extend_from_slice(data);
     }
 
     fn compact_buffer(&mut self) {
         let read_size = self.read_offset.saturating_sub(self.buf_offset);
         if read_size > 65_536 {
-            self.buf.drain(0..read_size);
+            self.data.drain(0..read_size);
             self.buf_offset = self.read_offset;
         }
     }
@@ -67,10 +67,10 @@ impl FrameBuffer {
     }
 
     pub fn read_remaining(&self, offset: usize) -> Option<&[u8]> {
-        if offset < self.buf_offset || offset - self.buf_offset >= self.buf.len() {
+        if offset < self.buf_offset || offset - self.buf_offset >= self.data.len() {
             return None;
         }
-        return Some(&self.buf[offset - self.buf_offset..]);
+        return Some(&self.data[offset - self.buf_offset..]);
     }
 
     pub fn read_frame(&self, info: &FrameInfo) -> &[u8] {
@@ -79,12 +79,12 @@ impl FrameBuffer {
             "read_frame has been called on destroyed frame"
         );
         assert!(
-            info.stream_end <= self.buf_offset + self.buf.len(),
+            info.stream_end <= self.buf_offset + self.data.len(),
             "read_frame has been called on incomplete frame"
         );
         let start_offset = info.stream_start - self.buf_offset;
         let end_offset = info.stream_end - self.buf_offset;
-        return &self.buf[start_offset + info.body_offset..end_offset];
+        return &self.data[start_offset + info.body_offset..end_offset];
     }
 
     pub fn find_frame(&self) -> FrameResult {
@@ -94,7 +94,7 @@ impl FrameBuffer {
             );
         }
         let start = self.frame_offset;
-        if start > self.buf_offset + self.buf.len() {
+        if start > self.buf_offset + self.data.len() {
             return FrameResult::Incomplete;
         }
 
@@ -128,7 +128,7 @@ impl FrameBuffer {
     }
 
     fn read_frame_resync(&self, start_offset: usize) -> FrameResult {
-        let end_offset = self.buf_offset + self.buf.len();
+        let end_offset = self.buf_offset + self.data.len();
         let mut offset = start_offset;
         while offset < end_offset {
             if self.chain_valid(offset, RESYNC_CHAIN_LEN) {
@@ -149,18 +149,18 @@ impl FrameBuffer {
     fn try_parse_startup(&self, offset: usize) -> Result<Option<FrameInfo>, ()> {
         let pos = offset - self.buf_offset;
 
-        let remaining = self.buf.len() - pos;
+        let remaining = self.data.len() - pos;
         if remaining < 4 {
             return Ok(None);
         }
-        if self.buf[pos] != 0x00 {
+        if self.data[pos] != 0x00 {
             return Err(());
         }
         let length = u32::from_be_bytes([
-            self.buf[pos],
-            self.buf[pos + 1],
-            self.buf[pos + 2],
-            self.buf[pos + 3],
+            self.data[pos],
+            self.data[pos + 1],
+            self.data[pos + 2],
+            self.data[pos + 3],
         ]) as usize;
         if !(8..=10_000_000).contains(&length) {
             return Err(());
@@ -170,10 +170,10 @@ impl FrameBuffer {
         }
         let code = if length >= 8 {
             Some(u32::from_be_bytes([
-                self.buf[pos + 4],
-                self.buf[pos + 5],
-                self.buf[pos + 6],
-                self.buf[pos + 7],
+                self.data[pos + 4],
+                self.data[pos + 5],
+                self.data[pos + 6],
+                self.data[pos + 7],
             ]))
         } else {
             None
@@ -191,19 +191,19 @@ impl FrameBuffer {
     fn try_parse_tagged(&self, offset: usize) -> Result<Option<FrameInfo>, ()> {
         let pos = offset - self.buf_offset;
 
-        let remaining = self.buf.len() - pos;
+        let remaining = self.data.len() - pos;
         if remaining < 5 {
             return Ok(None);
         }
-        let tag = self.buf[pos];
+        let tag = self.data[pos];
         if !CLIENT_TAGS.contains(&tag) {
             return Err(());
         }
         let length = u32::from_be_bytes([
-            self.buf[pos + 1],
-            self.buf[pos + 2],
-            self.buf[pos + 3],
-            self.buf[pos + 4],
+            self.data[pos + 1],
+            self.data[pos + 2],
+            self.data[pos + 3],
+            self.data[pos + 4],
         ]) as usize;
         if !(4..=10_000_000).contains(&length) {
             return Err(());

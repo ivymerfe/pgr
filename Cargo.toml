@@ -22,10 +22,11 @@ time = { version = "0.3.54", features = ["formatting", "macros", "local-offset"]
 tokio = { version = "1.53.0", features = ["full"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["fmt", "time"] }
-zstd = "0.13.3"
+zstd = {version = "0.13.3", features = ["zstdmt"] }
 libc = "0.2.189"
 rustix = {version = "1.1.4", features = ["time"] }
 tokio-util = "0.7.19"
+crossbeam-channel = "0.5.16"
 
 [build-dependencies]
 cargo_metadata = "0.23.1"
