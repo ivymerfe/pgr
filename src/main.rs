@@ -12,6 +12,7 @@ use crate::capture::reader::CaptureReader;
 use crate::compare::pair::PairMap;
 use crate::replay::addr_map::AddrMap;
 use crate::replay::client::ReplayManager;
+use crate::utils::files;
 
 mod capture;
 mod compare;
@@ -119,7 +120,7 @@ async fn run_command(cli: Cli) -> Result<(), Box<dyn Error>> {
             user,
             pass,
         } => {
-            let (map_path, map_file) = utils::try_create_a(addr_map, "csv").await?;
+            let (map_path, map_file) = files::try_create_a(addr_map, "csv").await?;
             let (input_path, reader) = open_cap_file(&input, cap_port)?;
             info!(
                 "Replaying {}[port={cap_port}] at host={host} port={port} user={user}",
@@ -137,7 +138,7 @@ async fn run_command(cli: Cli) -> Result<(), Box<dyn Error>> {
         } => {
             let output = output.unwrap_or_else(|| input.with_added_extension("csv"));
             let (input_path, reader) = open_cap_file(&input, cap_port)?;
-            let (output_path, output_file) = utils::try_create(output, "csv")?;
+            let (output_path, output_file) = files::try_create(output, "csv")?;
             info!(
                 "Dump {}[port={cap_port}] -> {}",
                 input_path.display(),
@@ -155,7 +156,7 @@ async fn run_command(cli: Cli) -> Result<(), Box<dyn Error>> {
         } => {
             let (c1_path, c1_reader) = open_cap_file(&c1, port1)?;
             let (c2_path, c2_reader) = open_cap_file(&c2, port2)?;
-            let (map_path, map_file) = utils::try_open(addr_map)?;
+            let (map_path, map_file) = files::try_open(addr_map)?;
             info!(
                 "Compare {}[{port1}] <=> {}[{port2}]",
                 c1_path.display(),
@@ -165,7 +166,7 @@ async fn run_command(cli: Cli) -> Result<(), Box<dyn Error>> {
             let mut map = PairMap::new(map_file)?;
             let mut delta_file = None;
             if let Some(delta) = delta {
-                let (delta_path, file) = utils::try_create(delta, "csv")?;
+                let (delta_path, file) = files::try_create(delta, "csv")?;
                 delta_file = Some(file);
                 info!("Deltas: {}", delta_path.display());
             }
@@ -179,7 +180,7 @@ fn open_cap_file(
     path: &PathBuf,
     port: u16,
 ) -> Result<(PathBuf, Box<dyn CaptureReader>), Box<dyn Error>> {
-    let (path, file) = utils::try_open(path)?;
+    let (path, file) = files::try_open(path)?;
     let reader = PcapReader::new(file, port)?;
     Ok((path, Box::new(reader)))
 }

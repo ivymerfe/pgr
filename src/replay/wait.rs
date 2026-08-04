@@ -1,7 +1,6 @@
-use std::time::Duration;
-use tokio::time::{Instant, sleep};
+use std::time::{Duration, Instant};
 
-const SPIN_MARGIN: Duration = Duration::from_micros(1000);
+use crate::utils::timerfd::Delay;
 
 #[derive(Clone)]
 pub struct WaitInfo {
@@ -23,25 +22,12 @@ impl WaitInfo {
         target_delta_us - elapsed_us
     }
 
-    pub async fn until(&mut self, target: u64) {
-        let delta = self.time_to(target);
-        if delta <= 0 {
-            return;
+    pub async fn until(&mut self, target: u64) -> Result<(), std::io::Error> {
+        let target_delta_us = target.saturating_sub(self.pcap_ts);
+        let deadline = self.start + Duration::from_micros(target_delta_us);
+        if Instant::now() >= deadline {
+            return Ok(());
         }
-
-        let dur = Duration::from_micros(delta as u64);
-        if dur > SPIN_MARGIN {
-            sleep(dur - SPIN_MARGIN).await;
-        }
-        let deadline = self.start.into_std()
-            + Duration::from_micros((target.saturating_sub(self.pcap_ts)) as u64);
-
-        tokio::task::spawn_blocking(move || {
-            while std::time::Instant::now() < deadline {
-                std::hint::spin_loop();
-            }
-        })
-        .await
-        .unwrap();
+        Delay::new(deadline)?.await
     }
 }

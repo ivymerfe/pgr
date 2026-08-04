@@ -227,7 +227,10 @@ async fn client_proc(
     conn_ts: u64,
     mut rx: mpsc::UnboundedReceiver<ClientMessage>,
 ) {
-    conn_wait.until(conn_ts).await;
+    if let Err(e) = conn_wait.until(conn_ts).await {
+        error!("[{me}] wait failed: {e}");
+        return;
+    }
 
     let mut wait = WaitInfo::start(conn_ts);
     info!("[{me}] Connecting");
@@ -270,7 +273,10 @@ async fn client_proc(
     });
     let write_loop = async {
         while let Some(msg) = rx.recv().await {
-            wait.until(msg.ts).await;
+            if let Err(e) = wait.until(msg.ts).await {
+                error!("[{me}] wait failed: {e}");
+                break;
+            }
             if let Err(e) = write.write_all(&msg.buf).await {
                 error!("[{me}] send failed: {e}");
                 break;

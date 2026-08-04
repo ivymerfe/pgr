@@ -25,3 +25,4 @@ tracing-subscriber = { version = "0.3.23", features = ["fmt", "time"] }
 zstd = "0.13.3"
 crossbeam-channel = "0.5.16"
 libc = "0.2.189"
+rustix = {version = "1.1.4", features = ["time"] }
