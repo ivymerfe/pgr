@@ -101,12 +101,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "aya-build"
+version = "0.2.0"
+source = "git+https://github.com/aya-rs/aya#7a827d4f5980a2d7580db8e15c0a9bc914e34aaf"
+dependencies = [
+ "anyhow",
+ "cargo_metadata",
+ "rustc_version",
+ "which",
+]
+
+[[package]]
 name = "aya-ebpf"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eace5970943931fea46a8cbdca208a8f6a9e0413d85a5a6c4e168f0b909570bc"
 dependencies = [
- "aya-build",
+ "aya-build 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "aya-ebpf-bindings",
  "aya-ebpf-cty",
  "aya-ebpf-macros",
@@ -119,7 +130,7 @@ version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf1f19286ebbda6673099b68d049034838f08e4939cef66c998a8d3e62825d76"
 dependencies = [
- "aya-build",
+ "aya-build 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "aya-ebpf-cty",
 ]
 
@@ -129,7 +140,7 @@ version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0884264bc8a51a49fed03df8feada3a21d703cf501dae33c28bdba5d2313ef33"
 dependencies = [
- "aya-build",
+ "aya-build 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -175,6 +186,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bb1307f12aa967b5a58416e87b3653360e0fd614a016b6e970db08fecbb1b80d"
 dependencies = [
  "serde_core",
+]
+
+[[package]]
+name = "capture-common"
+version = "0.1.0"
+dependencies = [
+ "aya",
+]
+
+[[package]]
+name = "capture-ebpf"
+version = "0.1.0"
+dependencies = [
+ "aya-ebpf",
+ "capture-common",
 ]
 
 [[package]]
@@ -272,13 +298,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 
 [[package]]
-name = "common"
-version = "0.1.0"
-dependencies = [
- "aya",
-]
-
-[[package]]
 name = "crc32fast"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -288,33 +307,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "crossbeam-channel"
-version = "0.5.16"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d85363c37faeca707aef026efa9f3b34d077bce547e48f770770625c6013679e"
-dependencies = [
- "crossbeam-utils",
-]
-
-[[package]]
-name = "crossbeam-utils"
-version = "0.8.22"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61803da095bee82a81bb1a452ecc25d3b2f1416d1897eb86430c6159ef717c17"
-
-[[package]]
 name = "deranged"
 version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
-
-[[package]]
-name = "ebpf"
-version = "0.1.0"
-dependencies = [
- "aya-ebpf",
- "common",
-]
 
 [[package]]
 name = "equivalent"
@@ -352,6 +348,18 @@ name = "foldhash"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
+
+[[package]]
+name = "futures-core"
+version = "0.3.33"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2cd50c473c80f6d7c3670a752354b8e569b1a7cbfdc0419ec88e5edad85e0dc7"
+
+[[package]]
+name = "futures-sink"
+version = "0.3.33"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e34418ac499d6305c2fb5ad0ed2f6ac998c5f8ca209b4510f7f94242c647e307"
 
 [[package]]
 name = "getrandom"
@@ -563,11 +571,13 @@ dependencies = [
 name = "pgr"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "aya",
+ "aya-build 0.2.0 (git+https://github.com/aya-rs/aya)",
  "bytes",
+ "capture-common",
+ "cargo_metadata",
  "clap",
- "common",
- "crossbeam-channel",
  "etherparse",
  "libc",
  "md5",
@@ -575,6 +585,7 @@ dependencies = [
  "rustix",
  "time",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
  "zstd",
@@ -895,6 +906,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "tokio-util"
+version = "0.7.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "494815d09bf52b5548659851081238f0ca39ff638363907596da739561c62c52"
+dependencies = [
+ "bytes",
+ "futures-core",
+ "futures-sink",
+ "pin-project-lite",
+ "tokio",
 ]
 
 [[package]]

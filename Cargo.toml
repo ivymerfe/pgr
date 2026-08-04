@@ -6,13 +6,13 @@ edition = "2024"
 [workspace]
 members = [
     ".",
-    "ebpf",
-    "common",
+    "capture-ebpf",
+    "capture-common",
 ]
 
 [dependencies]
 aya = "0.14.0"
-common = { path = "common", features = ["user"] }
+capture-common = { path = "capture-common", features = ["user"] }
 bytes = "1.12.1"
 clap = { version = "4.6.4", features = ["derive"] }
 etherparse = "0.21.0"
@@ -23,6 +23,11 @@ tokio = { version = "1.53.0", features = ["full"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["fmt", "time"] }
 zstd = "0.13.3"
-crossbeam-channel = "0.5.16"
 libc = "0.2.189"
 rustix = {version = "1.1.4", features = ["time"] }
+tokio-util = "0.7.19"
+
+[build-dependencies]
+cargo_metadata = "0.23.1"
+aya-build = { git = "https://github.com/aya-rs/aya" }
+anyhow = "1.0.104"

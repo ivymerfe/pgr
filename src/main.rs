@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use std::env;
 use std::error::Error;
+use std::net::IpAddr;
 use std::path::PathBuf;
 use time::{UtcOffset, macros::format_description};
 use tracing_subscriber::fmt::time::OffsetTime;
@@ -9,6 +10,7 @@ use tracing::{error, info};
 
 use crate::capture::pcap::PcapReader;
 use crate::capture::reader::CaptureReader;
+use crate::capture::zcap::{ZcapReader, ZcapWriter};
 use crate::compare::pair::PairMap;
 use crate::replay::addr_map::AddrMap;
 use crate::replay::client::ReplayManager;
@@ -83,6 +85,16 @@ enum Commands {
 
         #[arg(long = "p2", default_value_t = 5432, value_parser = clap::value_parser!(u16).range(1..))]
         port2: u16,
+    },
+    Capture {
+        #[arg(short, long, default_value = "capture.zcap")]
+        output: PathBuf,
+
+        #[arg(short, long, default_value = "lo")]
+        iface: String,
+
+        #[arg(short, long, default_value_t = 5432, value_parser = clap::value_parser!(u16).range(1..))]
+        port: u16,
     },
 }
 
@@ -172,6 +184,38 @@ async fn run_command(cli: Cli) -> Result<(), Box<dyn Error>> {
             }
             compare::compare(&mut map, c1_reader, c2_reader, delta_file)?;
         }
+        Commands::Capture {
+            output,
+            iface,
+            port,
+        } => {
+            let (out_path, out_file) = files::try_create(output, "zcap")?;
+            info!("Capturing into {}", out_path.display());
+            let mut writer = ZcapWriter::new(out_file)?;
+            let dst_ip: IpAddr = "::1".parse()?;
+            let (handle, mut rx) = capture::ebpf::start_capture(&iface, dst_ip, port).await?;
+            info!("Capture started");
+            let writer_handle = tokio::spawn(async move {
+                loop {
+                    match rx.recv().await {
+                        Some(event) => {
+                            if let Err(e) = writer.write_event(event) {
+                                error!("Failed to write event: {e}");
+                                break;
+                            }
+                        }
+                        None => break,
+                    }
+                }
+                if let Err(e) = writer.finish() {
+                    error!("Writer finish failed: {e}");
+                }
+            });
+            tokio::signal::ctrl_c().await?;
+            handle.token.cancel();
+            drop(handle.ebpf);
+            writer_handle.await?;
+        }
     }
     Ok(())
 }
@@ -180,9 +224,21 @@ fn open_cap_file(
     path: &PathBuf,
     port: u16,
 ) -> Result<(PathBuf, Box<dyn CaptureReader>), Box<dyn Error>> {
-    let (path, file) = files::try_open(path)?;
-    let reader = PcapReader::new(file, port)?;
-    Ok((path, Box::new(reader)))
+    if path.extension().is_none() {
+        return Err("only pcap and zcap files".into());
+    }
+    let ext = path.extension().unwrap();
+    if ext == "pcap" {
+        let (path, file) = files::try_open(path)?;
+        let reader = PcapReader::new(file, port)?;
+        Ok((path, Box::new(reader)))
+    } else if ext == "zcap" {
+        let (path, file) = files::try_open(path)?;
+        let reader = ZcapReader::new(file)?;
+        Ok((path, Box::new(reader)))
+    } else {
+        Err("only pcap and zcap files".into())
+    }
 }
 
 fn default_username() -> String {

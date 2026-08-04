@@ -8,18 +8,8 @@
       "name": "Debug executable 'pgr'",
       "type": "lldb",
       "request": "launch",
-      "cargo": {
-        "args": ["run", "--bin=pgr"]
-      },
-      "args": ["dump", "cap.pcap"]
-    },
-    {
-      "name": "Debug unit tests in executable 'pgr'",
-      "type": "lldb",
-      "request": "launch",
-      "cargo": {
-        "args": ["test", "--bin=pgr"]
-      }
+      "program": "${workspaceFolder}/target/debug/pgr",
+      "args": ["capture"]
     }
   ]
 }

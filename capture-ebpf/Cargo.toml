@@ -1,0 +1,8 @@
+[package]
+name = "capture-ebpf"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+aya-ebpf = "0.2.1"
+capture-common = { path = "../capture-common", features = ["default"] }

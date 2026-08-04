@@ -17,13 +17,13 @@ use tracing::{error, info, warn};
 use crate::{
     capture::{
         frame_buffer::{ConnState, FrameBuffer, FrameResult},
-        reader::{CaptureReader, ReadResult},
+        reader::{CaptureReader, ReadError},
     },
     replay::{
         addr_map::AddrMap,
         connection::{ReplayConfig, ReplayConnection},
+        pacer::Pacer,
         stats::ReplayStats,
-        wait::WaitInfo,
     },
 };
 
@@ -43,7 +43,7 @@ struct ClientInfo {
 struct ReplayClient {
     addr: SocketAddr,
     info: ClientInfo,
-    wait: WaitInfo,
+    pacer: Pacer,
     first_ts: u64,
     chan: Option<mpsc::UnboundedSender<ClientMessage>>,
     sent_offset: usize,
@@ -102,22 +102,21 @@ impl ReplayManager {
             }
         });
 
-        let mut wait = None;
+        let pacer = Pacer::start(0);
         let mut tasks = JoinSet::new();
         loop {
             match reader.next() {
-                ReadResult::Ok { addr, ts, buf } => {
-                    let wait = wait.get_or_insert_with(|| WaitInfo::start(ts));
-                    if let Some(client) = self.ensure_client(addr, ts, wait) {
-                        client.update(ts, buf, &mut tasks);
+                Ok(data) => {
+                    if let Some(client) = self.ensure_client(data.addr, data.ts, &pacer) {
+                        client.update(data.ts, data.buf, &mut tasks);
                     }
-                    if wait.time_to(ts) > 4_000_000 {
+                    if pacer.time_to(data.ts) > 4_000_000 {
                         sleep(Duration::from_secs(3)).await;
                     }
                 }
-                ReadResult::Continue => (),
-                ReadResult::Eof => break,
-                ReadResult::Error(e) => {
+                Err(ReadError::Continue) => (),
+                Err(ReadError::Eof) => break,
+                Err(ReadError::Error(e)) => {
                     error!("Failed to read pcap: {e}");
                     break;
                 }
@@ -135,12 +134,12 @@ impl ReplayManager {
         &mut self,
         addr: SocketAddr,
         first_ts: u64,
-        wait: &mut WaitInfo,
+        pacer: &Pacer,
     ) -> Option<&mut ReplayClient> {
         let client = self
             .clients
             .entry(addr)
-            .or_insert_with(|| ReplayClient::new(addr, self.info.clone(), wait.clone(), first_ts));
+            .or_insert_with(|| ReplayClient::new(addr, self.info.clone(), pacer.clone(), first_ts));
         if client.dead {
             return None;
         }
@@ -149,11 +148,11 @@ impl ReplayManager {
 }
 
 impl ReplayClient {
-    pub fn new(addr: SocketAddr, info: ClientInfo, wait: WaitInfo, first_ts: u64) -> Self {
+    pub fn new(addr: SocketAddr, info: ClientInfo, pacer: Pacer, first_ts: u64) -> Self {
         Self {
             addr,
             info,
-            wait,
+            pacer,
             first_ts,
             chan: None,
             sent_offset: 0,
@@ -189,7 +188,7 @@ impl ReplayClient {
             tasks.spawn(client_proc(
                 self.addr,
                 self.info.clone(),
-                self.wait.clone(),
+                self.pacer.clone(),
                 conn_ts,
                 rx,
             ));
@@ -223,16 +222,14 @@ impl ReplayClient {
 async fn client_proc(
     me: SocketAddr,
     info: ClientInfo,
-    mut conn_wait: WaitInfo,
+    pacer: Pacer,
     conn_ts: u64,
     mut rx: mpsc::UnboundedReceiver<ClientMessage>,
 ) {
-    if let Err(e) = conn_wait.until(conn_ts).await {
+    if let Err(e) = pacer.until(conn_ts).await {
         error!("[{me}] wait failed: {e}");
         return;
     }
-
-    let mut wait = WaitInfo::start(conn_ts);
     info!("[{me}] Connecting");
     let socket = match ReplayConnection::connect(info.server_addr, info.config.clone()).await {
         Ok(s) => s,
@@ -273,7 +270,7 @@ async fn client_proc(
     });
     let write_loop = async {
         while let Some(msg) = rx.recv().await {
-            if let Err(e) = wait.until(msg.ts).await {
+            if let Err(e) = pacer.until(msg.ts).await {
                 error!("[{me}] wait failed: {e}");
                 break;
             }

@@ -13,7 +13,7 @@ use tracing::{error, info, warn};
 use crate::capture::frame_buffer::FrameBuffer;
 use crate::capture::frame_buffer::FrameInfo;
 use crate::capture::reader::CaptureReader;
-use crate::capture::reader::ReadResult;
+use crate::capture::reader::ReadError;
 use crate::compare::pair::{ComparePair, PairMap};
 use crate::parser::c2s_display::TagFrame;
 
@@ -28,25 +28,17 @@ pub fn compare(
     let (mut c1_eof, mut c2_eof) = (false, false);
     let mut c1_ignore = HashSet::new();
     let mut c2_ignore = HashSet::new();
-    let mut c1_first_ts = 0;
-    let mut c2_first_ts = 0;
-
     while !c1_eof || !c2_eof {
         if !c1_eof {
             match c1_reader.next() {
-                ReadResult::Ok {
-                    addr,
-                    ts,
-                    buf: buf1,
-                } => {
+                Ok(mut data) => {
+                    let addr = data.addr;
+                    let buf1 = &mut data.buf;
                     if c1_ignore.contains(&addr) {
                         continue;
                     }
-                    if c1_first_ts == 0 {
-                        c1_first_ts = ts;
-                    }
                     if let Some(pair) = map.find_c1(addr) {
-                        pair.c1.read_buf(ts, buf1);
+                        pair.c1.read_buf(data.ts, buf1);
                         if let Some(buf2) = c2_reader.get_buffer(pair.c2.addr) {
                             check_pair(pair, buf1, buf2, &mut delta_writer)?;
                         }
@@ -55,11 +47,11 @@ pub fn compare(
                         c1_ignore.insert(addr);
                     }
                 }
-                ReadResult::Continue => (),
-                ReadResult::Eof => {
+                Err(ReadError::Continue) => (),
+                Err(ReadError::Eof) => {
                     c1_eof = true;
                 }
-                ReadResult::Error(e) => {
+                Err(ReadError::Error(e)) => {
                     error!("Failed to read capture1: {e}");
                     return Ok(());
                 }
@@ -67,19 +59,14 @@ pub fn compare(
         }
         if !c2_eof {
             match c2_reader.next() {
-                ReadResult::Ok {
-                    addr,
-                    ts,
-                    buf: buf2,
-                } => {
+                Ok(mut data) => {
+                    let addr = data.addr;
+                    let buf2 = &mut data.buf;
                     if c2_ignore.contains(&addr) {
                         continue;
                     }
-                    if c2_first_ts == 0 {
-                        c2_first_ts = ts;
-                    }
                     if let Some(pair) = map.find_c2(addr) {
-                        pair.c2.read_buf(ts, buf2);
+                        pair.c2.read_buf(data.ts, buf2);
                         if let Some(buf1) = c1_reader.get_buffer(pair.c1.addr) {
                             check_pair(pair, buf1, buf2, &mut delta_writer)?;
                         }
@@ -88,18 +75,18 @@ pub fn compare(
                         c2_ignore.insert(addr);
                     }
                 }
-                ReadResult::Continue => (),
-                ReadResult::Eof => {
+                Err(ReadError::Continue) => (),
+                Err(ReadError::Eof) => {
                     c2_eof = true;
                 }
-                ReadResult::Error(e) => {
+                Err(ReadError::Error(e)) => {
                     error!("Failed to read capture2: {e}");
                     return Ok(());
                 }
             }
         }
     }
-    analyze(map, c1_first_ts, c2_first_ts);
+    analyze(map);
     Ok(())
 }
 
@@ -156,7 +143,7 @@ fn divide_or_zero(a: f64, b: f64) -> f64 {
     if b != 0.0 { a / b } else { 0.0 }
 }
 
-fn analyze(map: &PairMap, c1_first_ts: u64, c2_first_ts: u64) {
+fn analyze(map: &PairMap) {
     for pair in map.clients.values() {
         let stats = &pair.stats;
         let frame_count_c1 = pair.c1.frame_count;
@@ -167,8 +154,8 @@ fn analyze(map: &PairMap, c1_first_ts: u64, c2_first_ts: u64) {
                 pair.c2.addr, pair.c1.addr, frame_count_c1, frame_count_c2
             )
         }
-        let rel_1 = (pair.c1.connect_ts - c1_first_ts) as f64;
-        let rel_2 = (pair.c2.connect_ts - c2_first_ts) as f64;
+        let rel_1 = pair.c1.connect_ts as f64;
+        let rel_2 = pair.c2.connect_ts as f64;
         info!(
             "{} / {}: conn {:.2}ms; avg {:.2}ms; max {:.2}ms <{}/{}> avg {:.2}ms; max {:.2}ms",
             pair.c2.addr,

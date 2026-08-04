@@ -4,7 +4,7 @@ use std::{collections::HashMap, io::Read, net::SocketAddr};
 
 use crate::capture::{
     frame_buffer::FrameBuffer,
-    reader::{CaptureReader, ReadResult},
+    reader::{CaptureReader, ReadData, ReadError, ReadResult},
     tcp_handler::TcpHandler,
 };
 
@@ -14,6 +14,7 @@ pub struct PcapReader<'a> {
     consume: usize,
     refill: bool,
     pub handlers: HashMap<SocketAddr, TcpHandler>,
+    pub first_ts: u64,
     pub packet_count: usize,
     pub bytes_read: usize,
     pub fail_count: usize,
@@ -36,10 +37,17 @@ impl<'a> PcapReader<'a> {
             consume: 0,
             refill: false,
             handlers: HashMap::new(),
+            first_ts: 0,
             packet_count: 0,
             bytes_read: 0,
             fail_count: 0,
         })
+    }
+}
+
+impl From<PcapError<&[u8]>> for ReadError {
+    fn from(value: PcapError<&[u8]>) -> Self {
+        Self::Error(value.to_string())
     }
 }
 
@@ -54,9 +62,7 @@ impl<'a> CaptureReader for PcapReader<'a> {
             self.consume = 0;
         }
         if self.refill {
-            if let Err(e) = self.pcap.refill() {
-                return ReadResult::Error(e.to_string());
-            }
+            self.pcap.refill()?;
             self.refill = false;
         }
         match self.pcap.next() {
@@ -65,25 +71,28 @@ impl<'a> CaptureReader for PcapReader<'a> {
                 self.consume += consumed;
                 if let Some(packet) = process_block(block, self.port) {
                     self.packet_count += 1;
+                    if self.first_ts == 0 {
+                        self.first_ts = packet.ts;
+                    }
                     let handler = self.handlers.entry(packet.addr).or_default();
                     if handler.process_packet(packet.tcp) {
-                        return ReadResult::Ok {
+                        return Ok(ReadData {
                             addr: packet.addr,
-                            ts: packet.ts,
+                            ts: packet.ts.saturating_sub(self.first_ts),
                             buf: &mut handler.buf,
-                        };
+                        });
                     }
                 } else {
                     self.fail_count += 1;
                 }
             }
-            Err(PcapError::Eof) => return ReadResult::Eof,
+            Err(PcapError::Eof) => return Err(ReadError::Eof),
             Err(PcapError::Incomplete(_sz)) => {
                 self.refill = true;
             }
-            Err(e) => return ReadResult::Error(e.to_string()),
+            Err(e) => return Err(e.into()),
         }
-        return ReadResult::Continue;
+        return Err(ReadError::Continue);
     }
 }
 
