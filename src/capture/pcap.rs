@@ -33,10 +33,7 @@ pub struct TsPacket<'a> {
 }
 
 impl<'a> PcapReader<'a> {
-    pub fn new<R: Read + Send + 'a>(
-        reader: R,
-        port: u16,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new<R: Read + Send + 'a>(reader: R, port: u16) -> anyhow::Result<Self> {
         Ok(Self {
             pcap: create_reader(131072, reader)?,
             port,

@@ -1,6 +1,5 @@
 use std::{
     collections::HashMap,
-    error::Error,
     net::{IpAddr, SocketAddr},
     sync::Arc,
     time::Duration,
@@ -64,7 +63,7 @@ impl ReplayManager {
         dbname: String,
         user: String,
         password: Option<String>,
-    ) -> Result<Self, Box<dyn Error>> {
+    ) -> anyhow::Result<Self> {
         let addr: IpAddr = host.parse()?;
         let config = ReplayConfig {
             user: user,
@@ -84,10 +83,7 @@ impl ReplayManager {
         })
     }
 
-    pub async fn replay(
-        &mut self,
-        mut reader: Box<dyn CaptureReader>,
-    ) -> Result<(), Box<dyn Error>> {
+    pub async fn replay(&mut self, mut reader: Box<dyn CaptureReader>) -> anyhow::Result<()> {
         let stats = self.info.stats.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(1));

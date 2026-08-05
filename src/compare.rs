@@ -2,12 +2,12 @@ mod client;
 pub mod pair;
 
 use std::collections::HashSet;
-use std::error::Error;
 use std::fs::File;
 use std::io::BufWriter;
 use std::io::Write;
 use std::net::SocketAddr;
 
+use anyhow::anyhow;
 use tracing::{error, info, warn};
 
 use crate::capture::frame_buffer::FrameBuffer;
@@ -22,7 +22,7 @@ pub fn compare(
     mut c1_reader: Box<dyn CaptureReader>,
     mut c2_reader: Box<dyn CaptureReader>,
     delta_file: Option<File>,
-) -> Result<(), Box<dyn Error>> {
+) -> anyhow::Result<()> {
     let mut delta_writer = delta_file.map(|f| BufWriter::new(f));
 
     let (mut c1_eof, mut c2_eof) = (false, false);
@@ -95,7 +95,7 @@ fn check_pair(
     buf1: &mut FrameBuffer,
     buf2: &mut FrameBuffer,
     delta_writer: &mut Option<BufWriter<File>>,
-) -> Result<(), Box<dyn Error>> {
+) -> anyhow::Result<()> {
     while pair.c1.has_frame() && pair.c2.has_frame() {
         let (info1, ts1) = pair.c1.pop_frame();
         let (info2, ts2) = pair.c2.pop_frame();
@@ -129,7 +129,7 @@ fn check_pair(
             }
             let e =
                 format_frame_mismatch(pair.c1.addr, &info1, frame1, pair.c2.addr, &info2, frame2);
-            return Err(e.into());
+            return Err(anyhow!(e));
         }
         pair.stats.update_ts(
             ts1.saturating_sub(pair.c1.connect_ts),

@@ -9,10 +9,7 @@ use crate::capture::reader::CaptureReader;
 use crate::capture::reader::ReadError;
 use crate::parser::c2s_display::TagFrame;
 
-pub fn dump(
-    mut reader: Box<dyn CaptureReader>,
-    output: File,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub fn dump(mut reader: Box<dyn CaptureReader>, output: File) -> anyhow::Result<()> {
     let mut writer = BufWriter::with_capacity(131072, output);
 
     loop {

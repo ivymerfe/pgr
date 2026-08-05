@@ -27,6 +27,8 @@ libc = "0.2.189"
 rustix = {version = "1.1.4", features = ["time"] }
 tokio-util = "0.7.19"
 crossbeam-channel = "0.5.16"
+anyhow = "1.0.104"
+bytesize = "2.7.0"
 
 [build-dependencies]
 cargo_metadata = "0.23.1"

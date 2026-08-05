@@ -5,6 +5,8 @@ use std::{
     net::SocketAddr,
 };
 
+use anyhow::anyhow;
+
 use crate::compare::client::Client;
 
 #[derive(Default)]
@@ -51,7 +53,7 @@ pub struct PairMap {
 }
 
 impl PairMap {
-    pub fn new(file: File) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(file: File) -> anyhow::Result<Self> {
         let reader = BufReader::new(file);
         let mut c1_to_c2 = HashMap::new();
         let mut c2_to_c1 = HashMap::new();
@@ -63,8 +65,8 @@ impl PairMap {
                 continue;
             }
             let mut parts = trimmed.split(",");
-            let left_str = parts.next().ok_or("Missing left addr")?.trim();
-            let right_str = parts.next().ok_or("Missing right addr")?.trim();
+            let left_str = parts.next().ok_or(anyhow!("Missing left addr"))?.trim();
+            let right_str = parts.next().ok_or(anyhow!("Missing right addr"))?.trim();
 
             let addr_1: SocketAddr = left_str.parse()?;
             let addr_2: SocketAddr = right_str.parse()?;

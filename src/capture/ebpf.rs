@@ -35,7 +35,7 @@ pub async fn start_capture(
     iface: &str,
     dst_ip: IpAddr,
     dst_port: u16,
-) -> Result<(CaptureHandle, Receiver<WireEvent>), Box<dyn std::error::Error>> {
+) -> anyhow::Result<(CaptureHandle, Receiver<WireEvent>)> {
     let mut ebpf = Ebpf::load(aya::include_bytes_aligned!(concat!(
         env!("OUT_DIR"),
         "/capture-ebpf"

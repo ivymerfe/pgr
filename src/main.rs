@@ -1,16 +1,16 @@
+use anyhow::anyhow;
+use bytesize::ByteSize;
 use clap::{Parser, Subcommand};
-use std::env;
-use std::error::Error;
 use std::net::IpAddr;
 use std::path::PathBuf;
+use std::{env, fs, path};
 use time::{UtcOffset, macros::format_description};
 use tracing_subscriber::fmt::time::OffsetTime;
 
 use tracing::{error, info};
 
-use crate::capture::pcap::PcapReader;
-use crate::capture::reader::CaptureReader;
-use crate::capture::zcap::ZcapReader;
+use crate::capture::acap::AcapWriter;
+use crate::capture::read_capture;
 use crate::compare::pair::PairMap;
 use crate::replay::addr_map::AddrMap;
 use crate::replay::client::ReplayManager;
@@ -88,7 +88,7 @@ enum Commands {
         port2: u16,
     },
     Capture {
-        #[arg(short, long, default_value = "capture.zcap")]
+        #[arg(short, long, default_value = "zz_cap")]
         output: PathBuf,
 
         #[arg(short, long, default_value = "lo")]
@@ -96,6 +96,12 @@ enum Commands {
 
         #[arg(short, long, default_value_t = 5432, value_parser = clap::value_parser!(u16).range(1..))]
         port: u16,
+
+        #[arg(short, long, default_value_t = 0)]
+        chunk: u32,
+
+        #[arg(short, long, default_value = "64MB")]
+        max_chunk: ByteSize,
 
         #[arg(short, long, default_value_t = 3, help = "Compression level")]
         level: i32,
@@ -119,7 +125,7 @@ enum Commands {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let local_offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
 
@@ -140,7 +146,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn run_command(cli: Cli) -> Result<(), Box<dyn Error>> {
+async fn run_command(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Commands::Replay {
             input,
@@ -153,7 +159,7 @@ async fn run_command(cli: Cli) -> Result<(), Box<dyn Error>> {
             pass,
         } => {
             let (map_path, map_file) = files::try_create_a(addr_map, "csv").await?;
-            let (input_path, reader) = open_cap_file(&input, cap_port)?;
+            let (input_path, reader) = read_capture(&input, cap_port)?;
             info!(
                 "Replaying {}[port={cap_port}] at host={host} port={port} user={user}",
                 input_path.display()
@@ -169,7 +175,7 @@ async fn run_command(cli: Cli) -> Result<(), Box<dyn Error>> {
             cap_port,
         } => {
             let output = output.unwrap_or_else(|| input.with_added_extension("csv"));
-            let (input_path, reader) = open_cap_file(&input, cap_port)?;
+            let (input_path, reader) = read_capture(&input, cap_port)?;
             let (output_path, output_file) = files::try_create(output, "csv")?;
             info!(
                 "Dump {}[port={cap_port}] -> {}",
@@ -186,8 +192,8 @@ async fn run_command(cli: Cli) -> Result<(), Box<dyn Error>> {
             port1,
             port2,
         } => {
-            let (c1_path, c1_reader) = open_cap_file(&c1, port1)?;
-            let (c2_path, c2_reader) = open_cap_file(&c2, port2)?;
+            let (c1_path, c1_reader) = read_capture(&c1, port1)?;
+            let (c2_path, c2_reader) = read_capture(&c2, port2)?;
             let (map_path, map_file) = files::try_open(addr_map)?;
             info!(
                 "Compare {}[{port1}] <=> {}[{port2}]",
@@ -208,14 +214,26 @@ async fn run_command(cli: Cli) -> Result<(), Box<dyn Error>> {
             output,
             iface,
             port,
+            chunk,
+            max_chunk,
             level,
             zw,
         } => {
-            let (out_path, out_file) = files::try_create(output, "zcap")?;
+            let out_path = path::absolute(output)?;
+            if !out_path.exists() {
+                fs::create_dir(&out_path)?;
+            }
+            if !out_path.is_dir() {
+                return Err(anyhow!("Not a directory: {}", out_path.display()));
+            }
             info!("Capturing into {}", out_path.display());
-            info!("Compression level = {level}, workers = {zw}");
+            info!(
+                "Start chunk = {} Max chunk size = {} Compression level = {}, workers = {}",
+                chunk, max_chunk, level, zw
+            );
             let dst_ip: IpAddr = "::1".parse()?;
-            capture::run_capture(out_file, &iface, dst_ip, port, level, zw).await?
+            let writer = AcapWriter::new(out_path, chunk, max_chunk.as_u64(), level, zw)?;
+            capture::run_capture(writer, &iface, dst_ip, port).await?
         }
         Commands::Compress {
             input,
@@ -236,27 +254,6 @@ async fn run_command(cli: Cli) -> Result<(), Box<dyn Error>> {
         }
     }
     Ok(())
-}
-
-fn open_cap_file(
-    path: &PathBuf,
-    port: u16,
-) -> Result<(PathBuf, Box<dyn CaptureReader>), Box<dyn Error>> {
-    if path.extension().is_none() {
-        return Err("only pcap and zcap files".into());
-    }
-    let ext = path.extension().unwrap();
-    if ext == "pcap" {
-        let (path, file) = files::try_open(path)?;
-        let reader = PcapReader::new(file, port)?;
-        Ok((path, Box::new(reader)))
-    } else if ext == "zcap" {
-        let (path, file) = files::try_open(path)?;
-        let reader = ZcapReader::new(file)?;
-        Ok((path, Box::new(reader)))
-    } else {
-        Err("only pcap and zcap files".into())
-    }
 }
 
 fn default_username() -> String {

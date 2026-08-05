@@ -1,6 +1,6 @@
 /target
 /data
 /capture-ebpf/src/vmlinux.rs
+/zz_*/
 *.pcap
-*.zcap
 *.csv
