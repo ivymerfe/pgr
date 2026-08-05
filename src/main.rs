@@ -100,7 +100,7 @@ enum Commands {
         #[arg(short, long, default_value_t = 0)]
         chunk: u32,
 
-        #[arg(short, long, default_value = "64MB")]
+        #[arg(short, long, default_value = "1G")]
         max_chunk: ByteSize,
 
         #[arg(short, long, default_value_t = 3, help = "Compression level")]

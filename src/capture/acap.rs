@@ -1,11 +1,14 @@
-use crate::capture::{
-    frame_buffer::FrameBuffer,
-    reader::{CaptureReader, ReadData, ReadError, ReadResult},
+use crate::{
+    capture::{
+        frame_buffer::FrameBuffer,
+        reader::{CaptureReader, ReadData, ReadError, ReadResult},
+    },
+    utils::counting_writer::CountingWriter,
 };
 use std::{
     collections::HashMap,
     fs::{self, File},
-    io::{self, BufRead, BufReader, BufWriter, Read, Write},
+    io::{self, BufRead, BufReader, Read, Write},
     net::SocketAddr,
     path::PathBuf,
 };
@@ -56,13 +59,12 @@ impl AcapMap {
 
 pub struct AcapWriter {
     folder: PathBuf,
-    map: AcapMap,
     chunk_max_size: u64,
-    chunk_size: u64,
     chunk_idx: u32,
     compression_level: i32,
     worker_count: u8,
-    chunk_writer: Encoder<'static, BufWriter<File>>,
+    map: AcapMap,
+    chunk_writer: Encoder<'static, CountingWriter<File>>,
 }
 
 impl AcapWriter {
@@ -84,12 +86,11 @@ impl AcapWriter {
         let chunk_writer = Self::open_chunk(&folder, first_chunk, compression_level, worker_count)?;
         Ok(Self {
             folder,
-            map,
             chunk_max_size,
-            chunk_size: 0,
             chunk_idx: first_chunk,
             compression_level,
             worker_count,
+            map,
             chunk_writer,
         })
     }
@@ -99,9 +100,9 @@ impl AcapWriter {
         idx: u32,
         compression_level: i32,
         worker_count: u8,
-    ) -> anyhow::Result<Encoder<'static, BufWriter<File>>> {
+    ) -> anyhow::Result<Encoder<'static, CountingWriter<File>>> {
         let file = File::create(folder.join(format!("{idx}.zst")))?;
-        let mut encoder = Encoder::new(BufWriter::new(file), compression_level)?;
+        let mut encoder = Encoder::new(CountingWriter::new(file), compression_level)?;
         encoder.set_parameter(CParameter::NbWorkers(worker_count as u32))?;
         Ok(encoder)
     }
@@ -115,12 +116,11 @@ impl AcapWriter {
         )?;
         std::mem::replace(&mut self.chunk_writer, next).finish()?;
         self.chunk_idx += 1;
-        self.chunk_size = 0;
         Ok(())
     }
 
     pub fn write(&mut self, addr: &SocketAddr, ts: u32, data: &[u8]) -> anyhow::Result<()> {
-        if self.chunk_size >= self.chunk_max_size {
+        if self.chunk_writer.get_ref().count >= self.chunk_max_size {
             self.roll_chunk()?;
         }
         let id = self.map.get_id(addr.clone());
@@ -133,7 +133,6 @@ impl AcapWriter {
         if len > 0 {
             w.write_all(data)?;
         }
-        self.chunk_size += 4 + 4 + 4 + len as u64;
         Ok(())
     }
 
