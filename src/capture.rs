@@ -19,11 +19,11 @@ pub mod reassembler;
 
 pub async fn run_capture(
     mut writer: AcapWriter,
-    iface: &str,
-    dst_ip: IpAddr,
+    interface: &str,
+    addr: IpAddr,
     port: u16,
 ) -> anyhow::Result<()> {
-    let (handle, rx) = capture::ebpf::start_capture(iface, dst_ip, port).await?;
+    let (handle, rx) = capture::ebpf::start_capture(interface, addr, port).await?;
     info!("Capture started");
     let writer_handle = tokio::task::spawn_blocking(move || {
         loop {

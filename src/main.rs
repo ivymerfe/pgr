@@ -1,14 +1,15 @@
 use anyhow::anyhow;
 use bytesize::ByteSize;
 use clap::{Parser, Subcommand};
+
 use std::io::BufWriter;
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::{env, fs, path};
-use time::{UtcOffset, macros::format_description};
-use tracing_subscriber::fmt::time::OffsetTime;
 
+use time::{UtcOffset, macros::format_description};
 use tracing::{error, info};
+use tracing_subscriber::fmt::time::OffsetTime;
 
 use crate::capture::acap::AcapWriter;
 use crate::capture::read_capture;
@@ -34,93 +35,144 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    #[command(about = "Replay a capture against another database")]
     Replay {
-        #[arg(required = true)]
+        #[arg(help = "Path to the capture (acap folder or .pcap file)")]
         input: PathBuf,
 
-        #[arg(short, long, default_value_t = 5432, value_parser = clap::value_parser!(u16).range(1..))]
+        #[arg(
+            short,
+            long,
+            default_value_t = 5432,
+            help = "Port the capture was recorded on"
+        )]
         cap_port: u16,
 
-        #[arg(short, long, default_value = "replay.csv")]
+        #[arg(
+            short,
+            long,
+            default_value = "replay.csv",
+            help = "File to store address mapping (needed for compare)"
+        )]
         addr_map: PathBuf,
 
-        #[arg(short, long, default_value = "127.0.0.1")]
+        #[arg(short, long, default_value = "127.0.0.1", help = "Target server host")]
         host: String,
 
-        #[arg(short, long, default_value_t = 5432, value_parser = clap::value_parser!(u16).range(1..))]
+        #[arg(short, long, default_value_t = 5432, help = "Target server port")]
         port: u16,
 
-        #[arg(short, long, default_value = "postgres")]
+        #[arg(short, long, default_value = "postgres", help = "Database name")]
         dbname: String,
 
-        #[arg(short, long, default_value_t = default_username())]
+        #[arg(short, long, default_value_t = default_username(), help = "Database user")]
         user: String,
 
-        #[arg(short = 'P', long)]
+        #[arg(short = 'P', long, help = "Password")]
         pass: Option<String>,
     },
+    #[command(about = "Dump a capture to CSV")]
     Dump {
-        #[arg(required = true)]
+        #[arg(help = "Path to the capture")]
         input: PathBuf,
 
-        #[arg()]
-        output: Option<PathBuf>,
+        #[arg(short, long, default_value = "capture.csv", help = "Output CSV path")]
+        output: PathBuf,
 
-        #[arg(short, long, default_value_t = 5432, value_parser = clap::value_parser!(u16).range(1..))]
-        cap_port: u16,
+        #[arg(
+            short,
+            long,
+            default_value_t = 5432,
+            help = "Port to parse traffic for"
+        )]
+        port: u16,
     },
+    #[command(about = "Compare two captures")]
     Compare {
-        #[arg(required = true)]
+        #[arg(short, long, help = "Source capture")]
         src: PathBuf,
 
-        #[arg(required = true)]
+        #[arg(short, long, help = "Replay result capture")]
         replay: PathBuf,
 
-        #[arg(short, long, default_value = "replay.csv")]
+        #[arg(
+            short,
+            long,
+            default_value = "replay.csv",
+            help = "Address mapping file produced by replay"
+        )]
         addr_map: PathBuf,
 
-        #[arg(long)]
+        #[arg(long, help = "File to save differences to")]
         delta: Option<PathBuf>,
 
-        #[arg(default_value_t = 5432, value_parser = clap::value_parser!(u16).range(1..))]
+        #[arg(long, default_value_t = 5432, help = "Port in the source capture")]
         src_port: u16,
 
-        #[arg(default_value_t = 5432, value_parser = clap::value_parser!(u16).range(1..))]
+        #[arg(long, default_value_t = 5432, help = "Port in the replay capture")]
         replay_port: u16,
     },
+    #[command(about = "Capture traffic")]
     Capture {
-        #[arg(short, long, default_value = "zz_cap")]
+        #[arg(
+            short,
+            long,
+            default_value = "zz_cap",
+            help = "Folder to write the capture to"
+        )]
         output: PathBuf,
 
-        #[arg(short, long, default_value = "lo")]
-        iface: String,
+        #[arg(short, long, default_value = "lo", help = "Network interface")]
+        interface: String,
 
-        #[arg(short, long, default_value_t = 5432, value_parser = clap::value_parser!(u16).range(1..))]
+        #[arg(
+            short,
+            long,
+            default_value = "::1",
+            help = "Address to filter traffic by"
+        )]
+        addr: IpAddr,
+
+        #[arg(short, long, default_value_t = 5432, help = "Port to capture")]
         port: u16,
 
-        #[arg(short, long, default_value_t = 0)]
+        #[arg(
+            short,
+            long,
+            default_value_t = 0,
+            help = "Chunk number to start from (for appending)"
+        )]
         chunk: u32,
 
-        #[arg(short, long, default_value = "1G")]
+        #[arg(short, long, default_value = "1GiB", help = "Maximum chunk size")]
         max_chunk: ByteSize,
 
-        #[arg(short, long, default_value_t = 3, help = "Compression level")]
+        #[arg(short, long, default_value_t = 3, help = "zstd compression level")]
         level: i32,
 
-        #[arg(long, default_value_t = 4, help = "Number of zstd workers")]
+        #[arg(
+            long,
+            default_value_t = 4,
+            help = "Number of compression worker threads"
+        )]
         zw: u8,
     },
+    #[command(about = "Compress a file with zstd")]
     Compress {
-        #[arg()]
+        #[arg(help = "Input file")]
         input: PathBuf,
 
-        #[arg()]
+        #[arg(short, long, help = "Output file")]
         output: PathBuf,
 
-        #[arg(short, long, default_value_t = 3, help = "Compression level")]
+        #[arg(short, long, default_value_t = 3, help = "zstd compression level")]
         level: i32,
 
-        #[arg(long, default_value_t = 4, help = "Number of zstd workers")]
+        #[arg(
+            long,
+            default_value_t = 4,
+            help = "Number of compression worker threads"
+        )]
         zw: u8,
     },
 }
@@ -173,13 +225,12 @@ async fn run_command(cli: Cli) -> anyhow::Result<()> {
         Commands::Dump {
             input,
             output,
-            cap_port,
+            port,
         } => {
-            let output = output.unwrap_or_else(|| input.with_added_extension("csv"));
-            let (input_path, reader) = read_capture(&input, cap_port)?;
+            let (input_path, reader) = read_capture(&input, port)?;
             let (output_path, output_file) = files::try_create(output, "csv")?;
             info!(
-                "Dump {}[port={cap_port}] -> {}",
+                "Dump {}[port={port}] -> {}",
                 input_path.display(),
                 output_path.display()
             );
@@ -213,7 +264,8 @@ async fn run_command(cli: Cli) -> anyhow::Result<()> {
         }
         Commands::Capture {
             output,
-            iface,
+            interface,
+            addr,
             port,
             chunk,
             max_chunk,
@@ -232,9 +284,8 @@ async fn run_command(cli: Cli) -> anyhow::Result<()> {
                 "Start chunk = {} Max chunk size = {} Compression level = {}, workers = {}",
                 chunk, max_chunk, level, zw
             );
-            let dst_ip: IpAddr = "::1".parse()?;
             let writer = AcapWriter::new(out_path, chunk, max_chunk.as_u64(), level, zw)?;
-            capture::run_capture(writer, &iface, dst_ip, port).await?
+            capture::run_capture(writer, &interface, addr, port).await?
         }
         Commands::Compress {
             input,
