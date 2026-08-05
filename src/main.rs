@@ -1,6 +1,7 @@
 use anyhow::anyhow;
 use bytesize::ByteSize;
 use clap::{Parser, Subcommand};
+use std::io::BufWriter;
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::{env, fs, path};
@@ -70,22 +71,22 @@ enum Commands {
     },
     Compare {
         #[arg(required = true)]
-        c1: PathBuf,
+        src: PathBuf,
 
         #[arg(required = true)]
-        c2: PathBuf,
+        replay: PathBuf,
 
         #[arg(short, long, default_value = "replay.csv")]
         addr_map: PathBuf,
 
-        #[arg(short, long)]
+        #[arg(long)]
         delta: Option<PathBuf>,
 
-        #[arg(long = "p1", default_value_t = 5432, value_parser = clap::value_parser!(u16).range(1..))]
-        port1: u16,
+        #[arg(default_value_t = 5432, value_parser = clap::value_parser!(u16).range(1..))]
+        src_port: u16,
 
-        #[arg(long = "p2", default_value_t = 5432, value_parser = clap::value_parser!(u16).range(1..))]
-        port2: u16,
+        #[arg(default_value_t = 5432, value_parser = clap::value_parser!(u16).range(1..))]
+        replay_port: u16,
     },
     Capture {
         #[arg(short, long, default_value = "zz_cap")]
@@ -185,30 +186,30 @@ async fn run_command(cli: Cli) -> anyhow::Result<()> {
             dump::dump(reader, output_file)?;
         }
         Commands::Compare {
-            c1,
-            c2,
+            src,
+            replay,
             addr_map,
             delta,
-            port1,
-            port2,
+            src_port,
+            replay_port,
         } => {
-            let (c1_path, c1_reader) = read_capture(&c1, port1)?;
-            let (c2_path, c2_reader) = read_capture(&c2, port2)?;
+            let (src_path, src_reader) = read_capture(&src, src_port)?;
+            let (replay_path, replay_reader) = read_capture(&replay, replay_port)?;
             let (map_path, map_file) = files::try_open(addr_map)?;
             info!(
-                "Compare {}[{port1}] <=> {}[{port2}]",
-                c1_path.display(),
-                c2_path.display()
+                "Compare {}[{src_port}] <=> {}[{replay_port}]",
+                src_path.display(),
+                replay_path.display()
             );
             info!("Map: {}", map_path.display());
             let mut map = PairMap::new(map_file)?;
-            let mut delta_file = None;
+            let mut delta_writer = None;
             if let Some(delta) = delta {
                 let (delta_path, file) = files::try_create(delta, "csv")?;
-                delta_file = Some(file);
+                delta_writer = Some(BufWriter::new(file));
                 info!("Deltas: {}", delta_path.display());
             }
-            compare::compare(&mut map, c1_reader, c2_reader, delta_file)?;
+            compare::compare(&mut map, src_reader, replay_reader, delta_writer)?;
         }
         Commands::Capture {
             output,

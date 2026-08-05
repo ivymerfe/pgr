@@ -19,68 +19,66 @@ use crate::parser::c2s_display::TagFrame;
 
 pub fn compare(
     map: &mut PairMap,
-    mut c1_reader: Box<dyn CaptureReader>,
-    mut c2_reader: Box<dyn CaptureReader>,
-    delta_file: Option<File>,
+    mut src_reader: Box<dyn CaptureReader>,
+    mut replay_reader: Box<dyn CaptureReader>,
+    mut delta_writer: Option<BufWriter<File>>,
 ) -> anyhow::Result<()> {
-    let mut delta_writer = delta_file.map(|f| BufWriter::new(f));
-
-    let (mut c1_eof, mut c2_eof) = (false, false);
-    let mut c1_ignore = HashSet::new();
-    let mut c2_ignore = HashSet::new();
-    while !c1_eof || !c2_eof {
-        if !c1_eof {
-            match c1_reader.next() {
+    let (mut src_eof, mut replay_eof) = (false, false);
+    let mut src_ignore = HashSet::new();
+    let mut replay_ignore = HashSet::new();
+    while !src_eof || !replay_eof {
+        if !src_eof {
+            match src_reader.next() {
                 Ok(mut data) => {
                     let addr = data.addr;
-                    let buf1 = &mut data.buf;
-                    if c1_ignore.contains(&addr) {
+                    let src_buf = &mut data.buf;
+                    if src_ignore.contains(&addr) {
                         continue;
                     }
-                    if let Some(pair) = map.find_c1(addr) {
-                        pair.c1.read_buf(data.ts, buf1);
-                        if let Some(buf2) = c2_reader.get_buffer(pair.c2.addr) {
-                            check_pair(pair, buf1, buf2, &mut delta_writer)?;
+                    if let Some(pair) = map.find_from_src(addr) {
+                        pair.src.read_buf(data.ts, src_buf);
+                        if let Some(replay_buf) = replay_reader.get_buffer(pair.replay.addr) {
+                            check_pair(pair, src_buf, replay_buf, &mut delta_writer)?;
                         }
                     } else {
-                        warn!("Cannot find pair s1->s2: {addr}");
-                        c1_ignore.insert(addr);
+                        warn!("Cannot find pair src->replay: {addr}");
+                        src_ignore.insert(addr);
                     }
                 }
                 Err(ReadError::Continue) => (),
                 Err(ReadError::Eof) => {
-                    c1_eof = true;
+                    src_eof = true;
                 }
                 Err(ReadError::Error(e)) => {
-                    error!("Failed to read capture1: {e}");
+                    error!("Failed to read source capture: {e}");
                     return Ok(());
                 }
             }
         }
-        if !c2_eof {
-            match c2_reader.next() {
+        if !replay_eof {
+            match replay_reader.next() {
                 Ok(mut data) => {
                     let addr = data.addr;
-                    let buf2 = &mut data.buf;
-                    if c2_ignore.contains(&addr) {
+                    let replay_buf = &mut data.buf;
+                    if replay_ignore.contains(&addr) {
                         continue;
                     }
-                    if let Some(pair) = map.find_c2(addr) {
-                        pair.c2.read_buf(data.ts, buf2);
-                        if let Some(buf1) = c1_reader.get_buffer(pair.c1.addr) {
-                            check_pair(pair, buf1, buf2, &mut delta_writer)?;
+                    if let Some(pair) = map.find_from_replay(addr) {
+                        pair.replay.read_buf(data.ts, replay_buf);
+                        if let Some(src_buf) = src_reader.get_buffer(pair.src.addr) {
+                            check_pair(pair, src_buf, replay_buf, &mut delta_writer)?;
                         }
                     } else {
-                        warn!("Cannot find pair s2->s1: {addr}");
-                        c2_ignore.insert(addr);
+                        warn!("Cannot find pair replay->src: {addr}");
+                        replay_ignore.insert(addr);
                     }
                 }
                 Err(ReadError::Continue) => (),
                 Err(ReadError::Eof) => {
-                    c2_eof = true;
+                    replay_eof = true;
                 }
                 Err(ReadError::Error(e)) => {
-                    error!("Failed to read capture2: {e}");
+                    error!("Failed to read replay capture: {e}");
                     return Ok(());
                 }
             }
@@ -92,49 +90,52 @@ pub fn compare(
 
 fn check_pair(
     pair: &mut ComparePair,
-    buf1: &mut FrameBuffer,
-    buf2: &mut FrameBuffer,
+    src_buf: &mut FrameBuffer,
+    replay_buf: &mut FrameBuffer,
     delta_writer: &mut Option<BufWriter<File>>,
 ) -> anyhow::Result<()> {
-    while pair.c1.has_frame() && pair.c2.has_frame() {
-        let (info1, ts1) = pair.c1.pop_frame();
-        let (info2, ts2) = pair.c2.pop_frame();
-        let frame1 = buf1.read_frame(&info1);
-        let frame2 = buf2.read_frame(&info2);
+    while pair.src.has_frame() && pair.replay.has_frame() {
+        let (src_info, src_ts) = pair.src.pop_frame();
+        let (replay_info, replay_ts) = pair.replay.pop_frame();
+        let src_frame = src_buf.read_frame(&src_info);
+        let replay_frame = replay_buf.read_frame(&replay_info);
 
-        let rel_1 = ts1.saturating_sub(pair.c1.connect_ts) as f64;
-        let rel_2 = ts2.saturating_sub(pair.c2.connect_ts) as f64;
-        let ts = (rel_1.min(rel_2) as f64) / 1e6;
-        let delta = (rel_2 - rel_1) / 1e3;
+        let src_time = src_ts.saturating_sub(pair.src.connect_ts) as f64;
+        let replay_time = replay_ts.saturating_sub(pair.replay.connect_ts) as f64;
+        let min_time = (src_time.min(replay_time) as f64) / 1e6;
+        let delta = (replay_time - src_time) / 1e3;
         if let Some(writer) = delta_writer {
             writeln!(
                 writer,
                 "{:.6},{:.3},{},{}",
-                ts,
+                min_time,
                 delta,
-                pair.c1.addr,
-                TagFrame(info1.tag, frame1)
+                pair.src.addr,
+                TagFrame(src_info.tag, src_frame)
             )?;
         }
-        if frame1 != frame2 {
+        if src_frame != replay_frame {
             if let Some(writer) = delta_writer {
                 writeln!(
                     writer,
                     "{:.6},{:.3},{},{}",
-                    ts,
+                    min_time,
                     delta,
-                    pair.c2.addr,
-                    TagFrame(info2.tag, frame2)
+                    pair.replay.addr,
+                    TagFrame(replay_info.tag, replay_frame)
                 )?;
             }
-            let e =
-                format_frame_mismatch(pair.c1.addr, &info1, frame1, pair.c2.addr, &info2, frame2);
+            let e = format_frame_mismatch(
+                pair.src.addr,
+                &src_info,
+                src_frame,
+                pair.replay.addr,
+                &replay_info,
+                replay_frame,
+            );
             return Err(anyhow!(e));
         }
-        pair.stats.update_ts(
-            ts1.saturating_sub(pair.c1.connect_ts),
-            ts2.saturating_sub(pair.c2.connect_ts),
-        );
+        pair.stats.update_ts(src_time, replay_time);
     }
     Ok(())
 }
@@ -144,23 +145,23 @@ fn divide_or_zero(a: f64, b: f64) -> f64 {
 }
 
 fn analyze(map: &PairMap) {
-    for pair in map.clients.values() {
+    for pair in map.pairs.values() {
         let stats = &pair.stats;
-        let frame_count_c1 = pair.c1.frame_count;
-        let frame_count_c2 = pair.c2.frame_count;
-        if frame_count_c1 != frame_count_c2 {
+        let src_frame_count = pair.src.frame_count;
+        let replay_frame_count = pair.replay.frame_count;
+        if src_frame_count != replay_frame_count {
             warn!(
                 "{} / {}: frame count mismatch: {} / {}",
-                pair.c2.addr, pair.c1.addr, frame_count_c1, frame_count_c2
+                pair.replay.addr, pair.src.addr, src_frame_count, replay_frame_count
             )
         }
-        let rel_1 = pair.c1.connect_ts as f64;
-        let rel_2 = pair.c2.connect_ts as f64;
+        let src_connect = pair.src.connect_ts as f64;
+        let replay_connect = pair.replay.connect_ts as f64;
         info!(
             "{} / {}: conn {:.2}ms; avg {:.2}ms; max {:.2}ms <{}/{}> avg {:.2}ms; max {:.2}ms",
-            pair.c2.addr,
-            pair.c1.addr,
-            (rel_2 - rel_1) / 1e3,
+            pair.replay.addr,
+            pair.src.addr,
+            (replay_connect - src_connect) / 1e3,
             divide_or_zero(stats.sum_behind, stats.cnt_behind) / 1e3,
             stats.max_behind / 1e3,
             stats.cnt_behind,
@@ -172,22 +173,22 @@ fn analyze(map: &PairMap) {
 }
 
 pub fn format_frame_mismatch(
-    addr1: SocketAddr,
-    info1: &FrameInfo,
-    frame1: &[u8],
-    addr2: SocketAddr,
-    info2: &FrameInfo,
-    frame2: &[u8],
+    src_addr: SocketAddr,
+    src_info: &FrameInfo,
+    src_frame: &[u8],
+    replay_addr: SocketAddr,
+    replay_info: &FrameInfo,
+    replay_frame: &[u8],
 ) -> String {
     format!(
         "Frame contents do not match:\n{} at {}:{} <=> {} at {}:{}\n{}\n{}",
-        addr1,
-        info1.stream_start,
-        info1.stream_end,
-        addr2,
-        info2.stream_start,
-        info2.stream_end,
-        TagFrame(info1.tag, frame1),
-        TagFrame(info2.tag, frame2)
+        src_addr,
+        src_info.stream_start,
+        src_info.stream_end,
+        replay_addr,
+        replay_info.stream_start,
+        replay_info.stream_end,
+        TagFrame(src_info.tag, src_frame),
+        TagFrame(replay_info.tag, replay_frame)
     )
 }

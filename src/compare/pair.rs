@@ -21,12 +21,10 @@ pub struct CompareStats {
 }
 
 impl CompareStats {
-    pub fn update_ts(&mut self, rel_ts1: u64, rel_ts2: u64) {
+    pub fn update_ts(&mut self, src_time: f64, replay_time: f64) {
         self.total_updates += 1;
 
-        let rel_1 = rel_ts1 as f64;
-        let rel_2 = rel_ts2 as f64;
-        let delta = rel_2 - rel_1;
+        let delta = replay_time - src_time;
         if delta > 0.0 {
             self.cnt_behind += 1.0;
             self.sum_behind += delta;
@@ -40,23 +38,23 @@ impl CompareStats {
 }
 
 pub struct ComparePair {
-    pub c1: Client,
-    pub c2: Client,
+    pub src: Client,
+    pub replay: Client,
     pub stats: CompareStats,
 }
 
 #[derive(Default)]
 pub struct PairMap {
-    c1_to_c2: HashMap<SocketAddr, SocketAddr>,
-    c2_to_c1: HashMap<SocketAddr, SocketAddr>,
-    pub clients: HashMap<SocketAddr, ComparePair>,
+    src_to_replay: HashMap<SocketAddr, SocketAddr>,
+    replay_to_src: HashMap<SocketAddr, SocketAddr>,
+    pub pairs: HashMap<SocketAddr, ComparePair>,
 }
 
 impl PairMap {
     pub fn new(file: File) -> anyhow::Result<Self> {
         let reader = BufReader::new(file);
-        let mut c1_to_c2 = HashMap::new();
-        let mut c2_to_c1 = HashMap::new();
+        let mut src_to_replay = HashMap::new();
+        let mut replay_to_src = HashMap::new();
 
         for line_result in reader.lines() {
             let line = line_result?;
@@ -65,41 +63,45 @@ impl PairMap {
                 continue;
             }
             let mut parts = trimmed.split(",");
-            let left_str = parts.next().ok_or(anyhow!("Missing left addr"))?.trim();
-            let right_str = parts.next().ok_or(anyhow!("Missing right addr"))?.trim();
+            let src_str = parts.next().ok_or(anyhow!("Missing source addr"))?.trim();
+            let replay_str = parts.next().ok_or(anyhow!("Missing replay addr"))?.trim();
 
-            let addr_1: SocketAddr = left_str.parse()?;
-            let addr_2: SocketAddr = right_str.parse()?;
+            let src_addr: SocketAddr = src_str.parse()?;
+            let replay_addr: SocketAddr = replay_str.parse()?;
 
-            c1_to_c2.insert(addr_1, addr_2);
-            c2_to_c1.insert(addr_2, addr_1);
+            src_to_replay.insert(src_addr, replay_addr);
+            replay_to_src.insert(replay_addr, src_addr);
         }
 
         Ok(Self {
-            c1_to_c2,
-            c2_to_c1,
-            clients: HashMap::new(),
+            src_to_replay,
+            replay_to_src,
+            pairs: HashMap::new(),
         })
     }
 
-    fn get_or_create_pair(&mut self, c1_addr: SocketAddr, c2_addr: SocketAddr) -> &mut ComparePair {
-        self.clients.entry(c1_addr).or_insert_with(|| ComparePair {
-            c1: Client::new(c1_addr),
-            c2: Client::new(c2_addr),
+    fn get_or_create_pair(
+        &mut self,
+        src_addr: SocketAddr,
+        replay_addr: SocketAddr,
+    ) -> &mut ComparePair {
+        self.pairs.entry(src_addr).or_insert_with(|| ComparePair {
+            src: Client::new(src_addr),
+            replay: Client::new(replay_addr),
             stats: CompareStats::default(),
         })
     }
 
-    pub fn find_c1(&mut self, c1_addr: SocketAddr) -> Option<&mut ComparePair> {
-        if let Some(c2_addr) = self.c1_to_c2.get(&c1_addr) {
-            return Some(self.get_or_create_pair(c1_addr, c2_addr.clone()));
+    pub fn find_from_src(&mut self, src_addr: SocketAddr) -> Option<&mut ComparePair> {
+        if let Some(replay_addr) = self.src_to_replay.get(&src_addr) {
+            return Some(self.get_or_create_pair(src_addr, replay_addr.clone()));
         }
         return None;
     }
 
-    pub fn find_c2(&mut self, c2_addr: SocketAddr) -> Option<&mut ComparePair> {
-        if let Some(c1_addr) = self.c2_to_c1.get(&c2_addr) {
-            return Some(self.get_or_create_pair(c1_addr.clone(), c2_addr));
+    pub fn find_from_replay(&mut self, replay_addr: SocketAddr) -> Option<&mut ComparePair> {
+        if let Some(src_addr) = self.replay_to_src.get(&replay_addr) {
+            return Some(self.get_or_create_pair(src_addr.clone(), replay_addr));
         }
         return None;
     }
