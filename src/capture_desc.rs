@@ -63,25 +63,20 @@ impl fmt::Display for CaptureDesc {
         }
         let has_offset = self.ts_offset != 0;
         let has_duration = self.max_duration != u64::MAX;
-
-        if has_offset || has_duration {
-            write!(f, "@")?;
-            if has_offset {
-                write!(
-                    f,
-                    "({})",
-                    humantime::format_duration(Duration::from_micros(self.ts_offset))
-                )?;
-            }
-            if has_duration {
-                write!(
-                    f,
-                    "+({})",
-                    humantime::format_duration(Duration::from_micros(self.max_duration))
-                )?;
-            }
+        if has_offset {
+            write!(
+                f,
+                "(@{})",
+                humantime::format_duration(Duration::from_micros(self.ts_offset))
+            )?;
         }
-
+        if has_duration {
+            write!(
+                f,
+                "(+{})",
+                humantime::format_duration(Duration::from_micros(self.max_duration))
+            )?;
+        }
         Ok(())
     }
 }
