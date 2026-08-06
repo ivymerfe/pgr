@@ -137,7 +137,7 @@ async fn reader_loop(
                 v4.copy_from_slice(&event.src_ip[0..4]);
                 IpAddr::V4(Ipv4Addr::from(v4))
             };
-            let src_port = u16::from_be(event.src_port);
+            let src_port = event.src_port;
             let addr = SocketAddr::new(ip, src_port);
             let is_syn = event.flags & TCP_FLAG_SYN != 0;
             let ts = (event.timestamp_ns.saturating_sub(baseline_ns) / 1000) as u32;
