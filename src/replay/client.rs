@@ -9,7 +9,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     sync::{Mutex, mpsc},
     task::JoinSet,
-    time::sleep,
+    time::{sleep, timeout},
 };
 use tracing::{error, info, warn};
 
@@ -279,7 +279,15 @@ async fn client_proc(
     };
     tokio::select! {
         _ = write_loop => {
-            read_handle.abort();
+            info!("[{me}] Sent all");
+            match timeout(Duration::from_secs(2), &mut read_handle).await {
+                Ok(Ok(())) => info!("[{me}] Disconnected"),
+                Ok(Err(e)) => error!("[{me}] Read task error: {e}"),
+                Err(_) => {
+                    warn!("[{me}] Force disconnect after 2s");
+                    read_handle.abort();
+                }
+            }
         }
         res = &mut read_handle => {
             match res {
@@ -288,5 +296,4 @@ async fn client_proc(
             }
         }
     }
-    info!("[{me}] Disconnected");
 }
