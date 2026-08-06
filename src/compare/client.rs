@@ -6,8 +6,8 @@ use crate::capture::frame_buffer::{ConnState, FrameBuffer, FrameInfo, FrameResul
 
 pub struct Client {
     pub addr: SocketAddr,
-    pub connect_ts: u64,
     pub frame_count: u64,
+    connect_ts: Option<u64>,
     pending: VecDeque<(FrameInfo, u64)>,
 }
 
@@ -15,15 +15,15 @@ impl Client {
     pub fn new(addr: SocketAddr) -> Self {
         Self {
             addr,
-            connect_ts: 0,
+            connect_ts: None,
             frame_count: 0,
             pending: VecDeque::new(),
         }
     }
 
     pub fn read_buf(&mut self, ts: u64, buf: &mut FrameBuffer) {
-        if self.connect_ts == 0 {
-            self.connect_ts = ts;
+        if self.connect_ts.is_none() {
+            self.connect_ts = Some(ts);
         }
         loop {
             match buf.find_frame() {
@@ -41,6 +41,10 @@ impl Client {
                 }
             }
         }
+    }
+
+    pub fn connect_time(&self) -> u64 {
+        self.connect_ts.unwrap_or(0)
     }
 
     pub fn has_frame(&self) -> bool {

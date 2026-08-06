@@ -100,8 +100,8 @@ fn check_pair(
         let src_frame = src_buf.read_frame(&src_info);
         let replay_frame = replay_buf.read_frame(&replay_info);
 
-        let src_time = src_ts.saturating_sub(pair.src.connect_ts) as f64;
-        let replay_time = replay_ts.saturating_sub(pair.replay.connect_ts) as f64;
+        let src_time = src_ts.saturating_sub(pair.src.connect_time()) as f64;
+        let replay_time = replay_ts.saturating_sub(pair.replay.connect_time()) as f64;
         let min_time = (src_time.min(replay_time) as f64) / 1e6;
         let delta = (replay_time - src_time) / 1e3;
         if let Some(writer) = delta_writer {
@@ -155,8 +155,8 @@ fn analyze(map: &PairMap) {
                 pair.replay.addr, pair.src.addr, src_frame_count, replay_frame_count
             )
         }
-        let src_connect = pair.src.connect_ts as f64;
-        let replay_connect = pair.replay.connect_ts as f64;
+        let src_connect = pair.src.connect_time() as f64;
+        let replay_connect = pair.replay.connect_time() as f64;
         info!(
             "{} / {}: conn {:.2}ms; avg {:.2}ms; max {:.2}ms <{}/{}> avg {:.2}ms; max {:.2}ms",
             pair.replay.addr,
