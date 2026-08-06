@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand};
 
 use std::io::BufWriter;
 use std::path::PathBuf;
+use std::time::Duration;
 use std::{env, fs};
 
 use time::{UtcOffset, macros::format_description};
@@ -63,6 +64,14 @@ enum Commands {
 
         #[arg(short = 'P', long, help = "Password")]
         pass: Option<String>,
+
+        #[arg(
+            short = 'T',
+            long,
+            default_value_t = 3.0,
+            help = "Timeout to disconnect from server after replay ends (seconds)"
+        )]
+        timeout: f64,
     },
     #[command(about = "Dump a capture to CSV")]
     Dump {
@@ -177,13 +186,15 @@ async fn run_command(cli: Cli) -> anyhow::Result<()> {
             dbname,
             user,
             pass,
+            timeout,
         } => {
             let map_file = files::try_create_a(&addr_map, "csv").await?;
             let reader = read_capture(&input)?;
             info!("Replaying {input} -> {host}:{port} dbname={dbname} user={user}");
             info!("Map: {}", addr_map.display());
             let map = AddrMap::new(map_file);
-            let mut mgr = ReplayManager::new(map, host, port, dbname, user, pass).await?;
+            let timeout = Duration::from_secs_f64(timeout);
+            let mut mgr = ReplayManager::new(map, host, port, dbname, user, pass, timeout).await?;
             mgr.replay(reader).await?;
         }
         Commands::Dump { input, output } => {

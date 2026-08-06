@@ -37,6 +37,7 @@ struct ClientInfo {
     config: ReplayConfig,
     addr_map: Arc<Mutex<AddrMap>>,
     stats: Arc<ReplayStats>,
+    disconnect_timeout: Duration,
 }
 
 struct ReplayClient {
@@ -63,6 +64,7 @@ impl ReplayManager {
         dbname: String,
         user: String,
         password: Option<String>,
+        disconnect_timeout: Duration,
     ) -> anyhow::Result<Self> {
         let addr: IpAddr = host.parse()?;
         let config = ReplayConfig {
@@ -76,6 +78,7 @@ impl ReplayManager {
             config: config,
             addr_map: Arc::new(Mutex::new(addr_map)),
             stats: Arc::new(ReplayStats::new()),
+            disconnect_timeout,
         };
         Ok(Self {
             info,
@@ -280,11 +283,11 @@ async fn client_proc(
     tokio::select! {
         _ = write_loop => {
             info!("[{me}] Sent all");
-            match timeout(Duration::from_secs(2), &mut read_handle).await {
+            match timeout(info.disconnect_timeout, &mut read_handle).await {
                 Ok(Ok(())) => info!("[{me}] Disconnected"),
                 Ok(Err(e)) => error!("[{me}] Read task error: {e}"),
                 Err(_) => {
-                    warn!("[{me}] Force disconnect after 2s");
+                    warn!("[{me}] Force disconnect after {:.2}s", info.disconnect_timeout.as_secs_f64());
                     read_handle.abort();
                 }
             }
