@@ -10,15 +10,7 @@
 
 Бинарники: [GitHub Releases](https://github.com/ivymerfe/pgr/releases).
 
-Или собрать из исходников. Нужен [Rust/Cargo](https://www.rust-lang.org/tools/install), nightly toolchain и [bpf-linker](https://github.com/aya-rs/bpf-linker):
-
-```bash
-rustup toolchain install nightly
-```
-
-```bash
-cargo build --release
-```
+Как собрать смотри ниже
 
 ## Команды
 
@@ -45,11 +37,11 @@ pgr capture -o captures/session1 -i eth0 -a 10.0.0.5 -p 5432
 
 `replay`, `dump` и `compare` принимают захват строкой: `path[:port]@[offset][+duration]`
 
-- `port` — порт трафика в захвате, по умолчанию `5432`
+- `port` — порт трафика в захвате (.pcap), по умолчанию `5432`
 - `offset` — с какого момента читать (`2m`, `1h30m`...), по умолчанию с начала
 - `duration` — сколько читать, по умолчанию до конца
 
-Примеры: `captures/session1`, `captures/session1:6543@2m+5m`, `capture.pcap+10m`
+`captures/session1`, `captures/session1@2m+5m`, `capture.pcap:5432+10m`
 
 ### `replay` — воспроизвести захват
 
@@ -91,4 +83,15 @@ pgr compare -s captures/session1 -r captures/session2 --addr-map replay.csv --de
 | `-a, --addr-map` | `replay.csv` | Файл соответствия адресов, полученный на шаге `replay` |
 | `--delta`        | —            | Файл для сохранения различий                           |
 
-Сравнивает трафик из двух захватов, используя карту адресов из шага `replay`.
+## Сборка
+
+Нужен [Rust/Cargo](https://www.rust-lang.org/tools/install), nightly toolchain и [bpf-linker](https://github.com/aya-rs/bpf-linker):
+
+```bash
+rustup toolchain install nightly
+cargo install bpf-linker
+```
+
+```bash
+cargo build --release
+```
