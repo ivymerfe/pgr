@@ -1,9 +1,10 @@
-use std::path::{self, PathBuf};
+use std::path::{self};
 
 use crate::capture::acap::AcapReader;
 use crate::capture::pcap::PcapReader;
 use crate::capture::reader::CaptureReader;
 use crate::capture::{self, acap::AcapWriter};
+use crate::capture_desc::CaptureDesc;
 use crate::utils::files;
 
 use anyhow::anyhow;
@@ -42,18 +43,16 @@ pub async fn run_capture(mut writer: AcapWriter, interface: &str, port: u16) -> 
     Ok(())
 }
 
-pub fn read_capture(
-    path: &PathBuf,
-    port: u16,
-) -> anyhow::Result<(PathBuf, Box<dyn CaptureReader>)> {
+pub fn read_capture(desc: &CaptureDesc) -> anyhow::Result<Box<dyn CaptureReader>> {
+    let path = &desc.path;
     if path.is_file() {
-        let (path, file) = files::try_open(path)?;
-        let reader = PcapReader::new(file, port)?;
-        Ok((path, Box::new(reader)))
+        let file = files::try_open(path)?;
+        let reader = PcapReader::new(file, desc.port, desc.ts_offset, desc.max_duration)?;
+        Ok(Box::new(reader))
     } else if path.is_dir() {
         let abs_path = path::absolute(path)?;
-        let reader = AcapReader::new(&abs_path)?;
-        Ok((abs_path, Box::new(reader)))
+        let reader = AcapReader::new(&abs_path, desc.ts_offset, desc.max_duration)?;
+        Ok(Box::new(reader))
     } else {
         let abs_path = path::absolute(path)?;
         Err(anyhow!("File does not exist: {}", abs_path.display()))

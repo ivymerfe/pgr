@@ -156,6 +156,8 @@ fn open_chunk_reader(folder: &PathBuf, idx: u32) -> io::Result<Option<Box<dyn Re
 pub struct AcapReader {
     folder: PathBuf,
     map: AcapMap,
+    ts_offset: u64,
+    max_duration: u64,
     chunk_idx: u32,
     chunk_reader: Box<dyn Read + Send>,
     payload_buf: Vec<u8>,
@@ -166,13 +168,15 @@ pub struct AcapReader {
 }
 
 impl AcapReader {
-    pub fn new(folder: &PathBuf) -> anyhow::Result<Self> {
+    pub fn new(folder: &PathBuf, ts_offset: u64, max_duration: u64) -> anyhow::Result<Self> {
         let map = AcapMap::new(File::open(folder.join("map"))?)?;
         let chunk_reader = open_chunk_reader(&folder, 0)?
             .ok_or_else(|| anyhow::anyhow!("no chunk 0 in {}", folder.display()))?;
         Ok(Self {
             folder: folder.clone(),
             map,
+            ts_offset,
+            max_duration,
             chunk_idx: 0,
             chunk_reader,
             payload_buf: Vec::new(),
@@ -236,11 +240,18 @@ impl CaptureReader for AcapReader {
     }
 
     fn next(&mut self) -> ReadResult<'_> {
-        let (id, ts) = match self.try_next() {
+        let (id, ts_abs) = match self.try_next() {
             Ok((id, ts)) => (id, ts),
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Err(ReadError::Eof),
             Err(e) => return Err(e.into()),
         };
+        if ts_abs < self.ts_offset {
+            return Err(ReadError::Continue);
+        }
+        let ts_relative = ts_abs - self.ts_offset;
+        if ts_relative > self.max_duration {
+            return Err(ReadError::Eof);
+        }
         if let Some(addr) = self.map.get_addr(id) {
             let fb = self.buffers.entry(*addr).or_default();
             if self.payload_buf.is_empty() {
@@ -250,7 +261,7 @@ impl CaptureReader for AcapReader {
             }
             return Ok(ReadData {
                 addr: addr.clone(),
-                ts,
+                ts: ts_relative,
                 buf: fb,
             });
         }

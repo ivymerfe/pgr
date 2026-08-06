@@ -30,6 +30,7 @@ crossbeam-channel = "0.5.16"
 anyhow = "1.0.104"
 bytesize = "2.7.0"
 aya-log = "0.3.0"
+humantime = "2.4.0"
 
 [build-dependencies]
 cargo_metadata = "0.23.1"

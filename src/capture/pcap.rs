@@ -14,9 +14,17 @@ struct PcapClient {
     fb: FrameBuffer,
 }
 
+pub struct TsPacket<'a> {
+    pub addr: SocketAddr,
+    pub ts: u64,
+    pub tcp: TcpSlice<'a>,
+}
+
 pub struct PcapReader<'a> {
     pcap: Box<dyn PcapReaderIterator + Send + 'a>,
     port: u16,
+    ts_offset: u64,
+    max_duration: u64,
     consume: usize,
     refill: bool,
     handlers: HashMap<SocketAddr, PcapClient>,
@@ -26,17 +34,18 @@ pub struct PcapReader<'a> {
     pub fail_count: usize,
 }
 
-pub struct TsPacket<'a> {
-    pub addr: SocketAddr,
-    pub ts: u64,
-    pub tcp: TcpSlice<'a>,
-}
-
 impl<'a> PcapReader<'a> {
-    pub fn new<R: Read + Send + 'a>(reader: R, port: u16) -> anyhow::Result<Self> {
+    pub fn new<R: Read + Send + 'a>(
+        reader: R,
+        port: u16,
+        ts_offset: u64,
+        max_duration: u64,
+    ) -> anyhow::Result<Self> {
         Ok(Self {
             pcap: create_reader(131072, reader)?,
             port,
+            ts_offset,
+            max_duration,
             consume: 0,
             refill: false,
             handlers: HashMap::new(),
@@ -77,6 +86,14 @@ impl<'a> CaptureReader for PcapReader<'a> {
                     if self.first_ts == 0 {
                         self.first_ts = packet.ts;
                     }
+                    let ts_abs = packet.ts.saturating_sub(self.first_ts);
+                    if ts_abs < self.ts_offset {
+                        return Err(ReadError::Continue);
+                    }
+                    let ts_relative = ts_abs - self.ts_offset;
+                    if ts_relative > self.max_duration {
+                        return Err(ReadError::Eof);
+                    }
                     let client = self.handlers.entry(packet.addr).or_default();
                     let tcp = packet.tcp;
                     let fb = &mut client.fb;
@@ -91,7 +108,7 @@ impl<'a> CaptureReader for PcapReader<'a> {
                     ) {
                         return Ok(ReadData {
                             addr: packet.addr,
-                            ts: packet.ts.saturating_sub(self.first_ts),
+                            ts: ts_relative,
                             buf: fb,
                         });
                     }
