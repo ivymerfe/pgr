@@ -1,6 +1,6 @@
 #![no_std]
 
-pub const CHUNK_SIZE: usize = 1480;
+pub const CHUNK_SIZE: usize = 1024;
 
 #[repr(C)]
 pub struct CaptureEvent {
@@ -19,9 +19,6 @@ pub struct CaptureEvent {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Config {
-    pub dst_ip: [u8; 16],
-    pub is_v6: u8,
-    pub _pad: [u8; 3],
     pub dst_port: u16,
 }
 

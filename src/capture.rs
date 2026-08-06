@@ -1,4 +1,3 @@
-use std::net::IpAddr;
 use std::path::{self, PathBuf};
 
 use crate::capture::acap::AcapReader;
@@ -17,13 +16,8 @@ pub mod pcap;
 pub mod reader;
 pub mod reassembler;
 
-pub async fn run_capture(
-    mut writer: AcapWriter,
-    interface: &str,
-    addr: IpAddr,
-    port: u16,
-) -> anyhow::Result<()> {
-    let (handle, rx) = capture::ebpf::start_capture(interface, addr, port).await?;
+pub async fn run_capture(mut writer: AcapWriter, interface: &str, port: u16) -> anyhow::Result<()> {
+    let (handle, rx) = capture::ebpf::start_capture(interface, port).await?;
     info!("Capture started");
     let writer_handle = tokio::task::spawn_blocking(move || {
         loop {

@@ -1,6 +1,7 @@
 #![no_std]
 #![no_main]
 
+mod emit;
 mod global;
 mod tc_classifier;
 

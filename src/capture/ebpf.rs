@@ -2,6 +2,7 @@ use aya::Ebpf;
 use aya::maps::{Array, RingBuf};
 use aya::programs::{SchedClassifier, TcAttachType, tc};
 
+use aya_log::EbpfLogger;
 use crossbeam_channel::{Receiver, Sender};
 
 use tokio::io::Interest;
@@ -33,7 +34,6 @@ pub struct CaptureHandle {
 
 pub async fn start_capture(
     iface: &str,
-    dst_ip: IpAddr,
     dst_port: u16,
 ) -> anyhow::Result<(CaptureHandle, Receiver<WireEvent>)> {
     let mut ebpf = Ebpf::load(aya::include_bytes_aligned!(concat!(
@@ -41,7 +41,7 @@ pub async fn start_capture(
         "/capture-ebpf"
     )))?;
     let mut config: Array<_, Config> = Array::try_from(ebpf.map_mut("CONFIG").unwrap())?;
-    config.set(0, parse_dst(dst_ip, dst_port), 0)?;
+    config.set(0, Config { dst_port }, 0)?;
 
     let _ = tc::qdisc_add_clsact(iface);
     let program: &mut SchedClassifier = ebpf.program_mut("tc_capture").unwrap().try_into()?;
@@ -51,6 +51,18 @@ pub async fn start_capture(
     let ring_buf = RingBuf::try_from(ebpf.take_map("EVENTS").unwrap())?;
     let baseline_ns = monotonic_ns();
     info!("Loaded program");
+
+    let logger = EbpfLogger::init(&mut ebpf).unwrap();
+    let mut logger =
+        tokio::io::unix::AsyncFd::with_interest(logger, tokio::io::Interest::READABLE).unwrap();
+
+    tokio::spawn(async move {
+        loop {
+            let mut guard = logger.readable_mut().await.unwrap();
+            guard.get_inner_mut().flush();
+            guard.clear_ready();
+        }
+    });
 
     let (tx, rx) = crossbeam_channel::unbounded();
     let shutdown = CancellationToken::new();
@@ -89,9 +101,11 @@ async fn reader_loop(
     };
     let mut clients: HashMap<SocketAddr, CaptureClient> = HashMap::new();
 
+    let mut total_recv = 0;
     loop {
         let mut guard = tokio::select! {
             _ = shutdown.cancelled() => {
+                info!("Received: {}", total_recv);
                 return;
             }
             readable = async_fd.readable_mut() => {
@@ -110,6 +124,7 @@ async fn reader_loop(
             if bytes.len() < event_size {
                 continue;
             }
+
             let event = unsafe { &*(bytes.as_ptr() as *const CaptureEvent) };
 
             let chunk_len = std::cmp::min(event.chunk_len as usize, CHUNK_SIZE);
@@ -141,6 +156,7 @@ async fn reader_loop(
                     error!("channel full, dropping event");
                 }
             }
+            total_recv += payload.len();
             if client.re.feed(event.seq, is_syn, payload, buf) {
                 if buf.len() > 0 {
                     let wire = WireEvent {
@@ -148,34 +164,13 @@ async fn reader_loop(
                         ts,
                         data: buf.clone(),
                     };
-                    if tx.try_send(wire).is_err() {
+                    if tx.send(wire).is_err() {
                         error!("channel full, dropping event");
                     }
                 }
             }
         }
         guard.clear_ready();
-    }
-}
-
-fn parse_dst(ip: IpAddr, port: u16) -> Config {
-    match ip {
-        IpAddr::V4(v4) => {
-            let mut buf = [0u8; 16];
-            buf[0..4].copy_from_slice(&v4.octets());
-            Config {
-                dst_ip: buf,
-                is_v6: 0,
-                _pad: [0; 3],
-                dst_port: port.to_be(),
-            }
-        }
-        IpAddr::V6(v6) => Config {
-            dst_ip: v6.octets(),
-            is_v6: 1,
-            _pad: [0; 3],
-            dst_port: port.to_be(),
-        },
     }
 }
 

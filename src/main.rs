@@ -3,7 +3,6 @@ use bytesize::ByteSize;
 use clap::{Parser, Subcommand};
 
 use std::io::BufWriter;
-use std::net::IpAddr;
 use std::path::PathBuf;
 use std::{env, fs, path};
 
@@ -122,27 +121,14 @@ enum Commands {
         )]
         output: PathBuf,
 
+        #[arg(short, long, default_value_t = false, help = "Force rewrite capture")]
+        rewrite: bool,
+
         #[arg(short, long, default_value = "lo", help = "Network interface")]
         interface: String,
 
-        #[arg(
-            short,
-            long,
-            default_value = "::1",
-            help = "Address to filter traffic by"
-        )]
-        addr: IpAddr,
-
         #[arg(short, long, default_value_t = 5432, help = "Port to capture")]
         port: u16,
-
-        #[arg(
-            short,
-            long,
-            default_value_t = 0,
-            help = "Chunk number to start from (for appending)"
-        )]
-        chunk: u32,
 
         #[arg(short, long, default_value = "1GiB", help = "Maximum chunk size")]
         max_chunk: ByteSize,
@@ -192,7 +178,7 @@ async fn main() -> anyhow::Result<()> {
     match run_command(cli).await {
         Ok(()) => (),
         Err(e) => {
-            error!("{}", e.to_string());
+            error!("{}", e);
         }
     }
 
@@ -264,28 +250,37 @@ async fn run_command(cli: Cli) -> anyhow::Result<()> {
         }
         Commands::Capture {
             output,
+            rewrite,
             interface,
-            addr,
             port,
-            chunk,
             max_chunk,
             level,
             zw,
         } => {
             let out_path = path::absolute(output)?;
-            if !out_path.exists() {
-                fs::create_dir(&out_path)?;
+            if out_path.exists() {
+                if !out_path.is_dir() {
+                    return Err(anyhow!("Not a directory: {}", out_path.display()));
+                }
+                if rewrite {
+                    fs::remove_dir_all(&out_path)?;
+                } else {
+                    return Err(anyhow!("Output directory exists: {}", out_path.display()));
+                }
             }
-            if !out_path.is_dir() {
-                return Err(anyhow!("Not a directory: {}", out_path.display()));
-            }
-            info!("Capturing into {}", out_path.display());
+            fs::create_dir(&out_path)?;
             info!(
-                "Start chunk = {} Max chunk size = {} Compression level = {}, workers = {}",
-                chunk, max_chunk, level, zw
+                "Capturing {},port={} => {}",
+                interface,
+                port,
+                out_path.display()
             );
-            let writer = AcapWriter::new(out_path, chunk, max_chunk.as_u64(), level, zw)?;
-            capture::run_capture(writer, &interface, addr, port).await?
+            info!(
+                "Max chunk size = {} Compression level = {}, zstd workers = {}",
+                max_chunk, level, zw
+            );
+            let writer = AcapWriter::new(out_path, max_chunk.as_u64(), level, zw)?;
+            capture::run_capture(writer, &interface, port).await?
         }
         Commands::Compress {
             input,

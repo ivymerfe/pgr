@@ -9,3 +9,5 @@ pub static CONFIG: Array<Config> = Array::with_max_entries(1, 0);
 
 #[map]
 pub static EVENTS: RingBuf = RingBuf::with_byte_size(32 * 1024 * 1024, 0);
+
+pub const MAX_CHUNKS: usize = 1024;

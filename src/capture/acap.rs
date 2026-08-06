@@ -70,7 +70,6 @@ pub struct AcapWriter {
 impl AcapWriter {
     pub fn new(
         folder: PathBuf,
-        first_chunk: u32,
         chunk_max_size: u64,
         compression_level: i32,
         worker_count: u8,
@@ -83,11 +82,11 @@ impl AcapWriter {
                 .append(true)
                 .open(folder.join("map"))?,
         )?;
-        let chunk_writer = Self::open_chunk(&folder, first_chunk, compression_level, worker_count)?;
+        let chunk_writer = Self::open_chunk(&folder, 0, compression_level, worker_count)?;
         Ok(Self {
             folder,
             chunk_max_size,
-            chunk_idx: first_chunk,
+            chunk_idx: 0,
             compression_level,
             worker_count,
             map,
