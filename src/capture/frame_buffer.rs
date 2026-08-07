@@ -66,13 +66,6 @@ impl FrameBuffer {
         self.compact_buffer();
     }
 
-    pub fn read_remaining(&self, offset: usize) -> Option<&[u8]> {
-        if offset < self.buf_offset || offset - self.buf_offset >= self.data.len() {
-            return None;
-        }
-        return Some(&self.data[offset - self.buf_offset..]);
-    }
-
     pub fn read_frame(&self, info: &FrameInfo) -> &[u8] {
         assert!(
             info.stream_start >= self.buf_offset,
@@ -85,6 +78,20 @@ impl FrameBuffer {
         let start_offset = info.stream_start - self.buf_offset;
         let end_offset = info.stream_end - self.buf_offset;
         return &self.data[start_offset + info.body_offset..end_offset];
+    }
+
+    pub fn read_frame_full(&self, info: &FrameInfo) -> &[u8] {
+        assert!(
+            info.stream_start >= self.buf_offset,
+            "read_frame has been called on destroyed frame"
+        );
+        assert!(
+            info.stream_end <= self.buf_offset + self.data.len(),
+            "read_frame has been called on incomplete frame"
+        );
+        let start_offset = info.stream_start - self.buf_offset;
+        let end_offset = info.stream_end - self.buf_offset;
+        return &self.data[start_offset..end_offset];
     }
 
     pub fn find_frame(&self) -> FrameResult {

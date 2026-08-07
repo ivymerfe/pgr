@@ -16,7 +16,7 @@ use crate::capture::read_capture;
 use crate::capture_desc::CaptureDesc;
 use crate::compare::pair::PairMap;
 use crate::replay::addr_map::AddrMap;
-use crate::replay::client::ReplayManager;
+use crate::replay::manager::ReplayManager;
 use crate::utils::files;
 
 mod capture;
@@ -24,6 +24,7 @@ mod capture_desc;
 mod compare;
 mod dump;
 mod parser;
+mod pg_client;
 mod replay;
 mod utils;
 mod zstd_test;

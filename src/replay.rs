@@ -1,5 +1,5 @@
 pub mod addr_map;
 pub mod client;
-mod connection;
+pub mod manager;
 mod pacer;
 mod stats;

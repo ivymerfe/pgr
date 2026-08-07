@@ -1,46 +1,35 @@
-use std::{
-    collections::HashMap,
-    net::{IpAddr, SocketAddr},
-    sync::Arc,
-    time::Duration,
-};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
     sync::{Mutex, mpsc},
     task::JoinSet,
-    time::{sleep, timeout},
+    time::timeout,
 };
 use tracing::{error, info, warn};
 
 use crate::{
-    capture::{
-        frame_buffer::{ConnState, FrameBuffer, FrameResult},
-        reader::{CaptureReader, ReadError},
-    },
-    replay::{
-        addr_map::AddrMap,
-        connection::{ReplayConfig, ReplayConnection},
-        pacer::Pacer,
-        stats::ReplayStats,
-    },
+    capture::frame_buffer::{ConnState, FrameBuffer, FrameResult},
+    pg_client::{PgClient, PgClientConfig, error::PgClientError},
+    replay::{addr_map::AddrMap, pacer::Pacer, stats::ReplayStats},
 };
 
-struct ClientMessage {
+pub struct ClientMessage {
     ts: u64,
-    buf: Vec<u8>,
+    tag: u8,
+    data: Vec<u8>,
+    flush: bool,
 }
 
 #[derive(Clone)]
-struct ClientInfo {
-    server_addr: SocketAddr,
-    config: ReplayConfig,
-    addr_map: Arc<Mutex<AddrMap>>,
-    stats: Arc<ReplayStats>,
-    disconnect_timeout: Duration,
+pub struct ClientInfo {
+    pub server_addr: SocketAddr,
+    pub config: PgClientConfig,
+    pub addr_map: Arc<Mutex<AddrMap>>,
+    pub stats: Arc<ReplayStats>,
+    pub disconnect_timeout: Duration,
 }
 
-struct ReplayClient {
+pub struct ReplayClient {
     addr: SocketAddr,
     info: ClientInfo,
     pacer: Pacer,
@@ -49,101 +38,6 @@ struct ReplayClient {
     sent_offset: usize,
     dead: bool,
     connected: bool,
-}
-
-pub struct ReplayManager {
-    info: ClientInfo,
-    clients: HashMap<SocketAddr, ReplayClient>,
-}
-
-impl ReplayManager {
-    pub async fn new(
-        addr_map: AddrMap,
-        host: String,
-        port: u16,
-        dbname: String,
-        user: String,
-        password: Option<String>,
-        disconnect_timeout: Duration,
-    ) -> anyhow::Result<Self> {
-        let addr: IpAddr = host.parse()?;
-        let config = ReplayConfig {
-            user: user,
-            password: password.map(|s| s.as_bytes().to_vec()),
-            dbname: dbname,
-            application_name: "pgr".to_string(),
-        };
-        let info = ClientInfo {
-            server_addr: SocketAddr::new(addr, port),
-            config: config,
-            addr_map: Arc::new(Mutex::new(addr_map)),
-            stats: Arc::new(ReplayStats::new()),
-            disconnect_timeout,
-        };
-        Ok(Self {
-            info,
-            clients: HashMap::new(),
-        })
-    }
-
-    pub async fn replay(&mut self, mut reader: Box<dyn CaptureReader>) -> anyhow::Result<()> {
-        let stats = self.info.stats.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(1));
-            interval.tick().await;
-
-            loop {
-                interval.tick().await;
-                let total = stats.read_total_sent();
-                let pps = stats.read_delta_sent();
-                let recv = stats.read_delta_recv();
-                info!("Total sent: {total} Delta sent: {pps} Delta recv: {recv}");
-            }
-        });
-
-        let pacer = Pacer::start(0);
-        let mut tasks = JoinSet::new();
-        loop {
-            match reader.next() {
-                Ok(data) => {
-                    if let Some(client) = self.ensure_client(data.addr, data.ts, &pacer) {
-                        client.update(data.ts, data.buf, &mut tasks);
-                    }
-                    if pacer.time_to(data.ts) > 4_000_000 {
-                        sleep(Duration::from_secs(3)).await;
-                    }
-                }
-                Err(ReadError::Continue) => (),
-                Err(ReadError::Eof) => break,
-                Err(ReadError::Error(e)) => {
-                    error!("Failed to read pcap: {e}");
-                    break;
-                }
-            }
-        }
-        for client in self.clients.values_mut() {
-            client.close();
-        }
-        info!("Finished reading, waiting for clients");
-        tasks.join_all().await;
-        Ok(())
-    }
-
-    fn ensure_client(
-        &mut self,
-        addr: SocketAddr,
-        first_ts: u64,
-        pacer: &Pacer,
-    ) -> Option<&mut ReplayClient> {
-        let client = self
-            .clients
-            .entry(addr)
-            .or_insert_with(|| ReplayClient::new(addr, self.info.clone(), pacer.clone(), first_ts));
-        if client.dead {
-            return None;
-        }
-        return Some(client);
-    }
 }
 
 impl ReplayClient {
@@ -159,6 +53,24 @@ impl ReplayClient {
             dead: false,
         }
     }
+
+    pub fn is_dead(&self) -> bool {
+        self.dead
+    }
+
+    pub fn send(&self, msg: ClientMessage) -> bool {
+        if let Some(chan) = &self.chan {
+            match chan.send(msg) {
+                Ok(()) => (),
+                Err(_) => {
+                    warn!("[{}] channel send failed", self.addr);
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
     pub fn update(&mut self, ts: u64, buf: &mut FrameBuffer, tasks: &mut JoinSet<()>) {
         let mut conn_ts = 0;
         while buf.state != ConnState::Normal && buf.state != ConnState::CopyIn {
@@ -181,6 +93,9 @@ impl ReplayClient {
                 }
             }
         }
+        if self.dead {
+            return;
+        }
         if !self.connected {
             let (tx, rx) = mpsc::unbounded_channel();
             self.chan = Some(tx);
@@ -193,28 +108,45 @@ impl ReplayClient {
             ));
             self.connected = true;
         }
-        if let Some(rem) = buf.read_remaining(self.sent_offset) {
-            if let Some(chan) = &self.chan {
-                let msg = ClientMessage {
-                    ts,
-                    buf: rem.to_vec(),
-                };
-                match chan.send(msg) {
-                    Ok(()) => {
-                        self.sent_offset += rem.len();
-                        buf.mark_read(self.sent_offset);
+        let mut ready_msg: Option<ClientMessage> = None;
+        while !self.dead {
+            match buf.find_frame() {
+                FrameResult::Complete(info) => {
+                    if let Some(msg) = ready_msg.take() {
+                        if !self.send(msg) {
+                            self.dead = true;
+                            return;
+                        }
                     }
-                    Err(_e) => {
-                        info!("[{}] removed", self.addr);
-                        self.dead = true;
+                    let data = buf.read_frame_full(&info);
+                    ready_msg = Some(ClientMessage {
+                        ts,
+                        tag: info.tag,
+                        data: data.to_vec(),
+                        flush: false,
+                    });
+                    buf.consume_frame(&info);
+                }
+                FrameResult::Incomplete => {
+                    if let Some(mut msg) = ready_msg.take() {
+                        msg.flush = true;
+                        if !self.send(msg) {
+                            self.dead = true;
+                        }
                     }
+                    return;
+                }
+                FrameResult::Desync => {
+                    warn!("[{}] desync", self.addr);
+                    buf.resync();
                 }
             }
         }
     }
 
     pub fn close(&mut self) {
-        self.chan = None
+        self.chan = None;
+        self.dead = true;
     }
 }
 
@@ -230,14 +162,14 @@ async fn client_proc(
         return;
     }
     info!("[{me}] Connecting");
-    let socket = match ReplayConnection::connect(info.server_addr, info.config.clone()).await {
+    let client = match PgClient::connect(info.server_addr, info.config.clone()).await {
         Ok(s) => s,
         Err(e) => {
             error!("[{me}] Connection failed: {e}");
             return;
         }
     };
-    let local_addr = socket.addr;
+    let local_addr = client.addr;
     info!("[{me}] Connected: {local_addr}");
 
     let mut addr_map = info.addr_map.lock().await;
@@ -249,20 +181,22 @@ async fn client_proc(
     }
     drop(addr_map);
 
-    let (mut read, mut write) = socket.stream.into_split();
+    let (mut reader, mut writer) = client.split();
+
     let read_stats = info.stats.clone();
     let mut read_handle = tokio::spawn(async move {
-        let mut chunk = [0u8; 65536];
         loop {
-            match read.read(&mut chunk).await {
-                Ok(sz) => {
-                    if sz == 0 {
-                        break;
-                    }
-                    read_stats.log_recv(sz);
+            match reader.next_frame().await {
+                Ok(frame) => {
+                    read_stats.log_recv(frame.data.len());
+                }
+                Err(PgClientError::ConnectionClosed) => {
+                    info!("[{me}] Disconnected");
+                    break;
                 }
                 Err(e) => {
                     error!("[{me}] read error: {e}");
+                    break;
                 }
             }
         }
@@ -273,9 +207,15 @@ async fn client_proc(
                 error!("[{me}] wait failed: {e}");
                 break;
             }
-            if let Err(e) = write.write_all(&msg.buf).await {
+            if let Err(e) = writer.send(&msg.data).await {
                 error!("[{me}] send failed: {e}");
                 break;
+            }
+            if msg.flush {
+                if let Err(e) = writer.flush().await {
+                    error!("[{me}] flush failed: {e}");
+                    break;
+                }
             }
             info.stats.log_send();
         }
@@ -284,7 +224,7 @@ async fn client_proc(
         _ = write_loop => {
             info!("[{me}] Sent all");
             match timeout(info.disconnect_timeout, &mut read_handle).await {
-                Ok(Ok(())) => info!("[{me}] Disconnected"),
+                Ok(Ok(())) => (),
                 Ok(Err(e)) => error!("[{me}] Read task error: {e}"),
                 Err(_) => {
                     warn!("[{me}] Force disconnect after {:.2}s", info.disconnect_timeout.as_secs_f64());
