@@ -31,8 +31,13 @@ anyhow = "1.0.104"
 bytesize = "2.7.0"
 aya-log = "0.3.0"
 humantime = "2.4.0"
+quanta = "0.12.6"
 
 [build-dependencies]
 cargo_metadata = "0.23.1"
 aya-build = { git = "https://github.com/aya-rs/aya" }
 anyhow = "1.0.104"
+
+[profile.dev]
+debug = true
+split-debuginfo = "unpacked" 

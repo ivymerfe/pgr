@@ -1,9 +1,6 @@
-use std::future::Future;
 use std::io::{Error, Result};
 use std::os::fd::{AsRawFd, RawFd};
-use std::pin::Pin;
-use std::task::{Context, Poll, ready};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use rustix::time::{Itimerspec, TimerfdClockId, TimerfdFlags, TimerfdTimerFlags, Timespec};
 use tokio::io::Interest;
@@ -31,56 +28,40 @@ fn read_u64(fd: RawFd) -> Result<u64> {
     }
 }
 
-pub struct Delay {
+pub struct Timer {
     fd: AsyncFd<rustix::fd::OwnedFd>,
-    deadline: Instant,
-    initialized: bool,
 }
 
-impl Delay {
-    pub fn new(deadline: Instant) -> Result<Self> {
+impl Timer {
+    pub fn new() -> Result<Self> {
         let fd = rustix::time::timerfd_create(
             TimerfdClockId::Monotonic,
             TimerfdFlags::NONBLOCK | TimerfdFlags::CLOEXEC,
         )?;
         let fd = AsyncFd::with_interest(fd, Interest::READABLE)?;
-        Ok(Delay {
-            fd,
-            deadline,
-            initialized: false,
-        })
+        Ok(Self { fd })
     }
-}
 
-impl Future for Delay {
-    type Output = Result<()>;
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if !self.initialized {
-            let now = Instant::now();
-            let duration = if self.deadline > now {
-                self.deadline - now
-            } else {
-                return Poll::Ready(Ok(()));
-            };
-            let spec = Itimerspec {
-                it_value: to_timespec(duration),
-                it_interval: Timespec {
-                    tv_sec: 0,
-                    tv_nsec: 0,
-                },
-            };
-            rustix::time::timerfd_settime(self.fd.get_ref(), TimerfdTimerFlags::empty(), &spec)?;
-            self.initialized = true;
+    pub async fn sleep_for(&mut self, duration: Duration) -> Result<()> {
+        if duration.is_zero() {
+            return Ok(());
         }
+        let spec = Itimerspec {
+            it_value: to_timespec(duration),
+            it_interval: Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+        };
+
+        rustix::time::timerfd_settime(self.fd.get_ref(), TimerfdTimerFlags::empty(), &spec)?;
 
         loop {
-            let mut guard = ready!(self.fd.poll_read_ready(cx))?;
-            let fd = self.fd.as_raw_fd();
-            match guard.try_io(|_| read_u64(fd)) {
+            let mut guard = self.fd.readable().await?;
+            match guard.try_io(|inner| read_u64(inner.as_raw_fd())) {
                 Ok(res) => {
                     res?;
-                    return Poll::Ready(Ok(()));
+                    return Ok(());
                 }
                 Err(_would_block) => continue,
             }

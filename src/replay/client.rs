@@ -1,7 +1,14 @@
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    net::SocketAddr,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use tokio::{
-    sync::{Mutex, mpsc},
+    sync::{
+        Mutex,
+        mpsc::{self, UnboundedSender},
+    },
     task::JoinSet,
     time::timeout,
 };
@@ -14,6 +21,7 @@ use crate::{
     },
     pg_client::{PgClient, PgClientConfig, error::PgClientError},
     replay::{addr_map::AddrMapWriter, pacer::Pacer, stats::ReplayStats},
+    utils::timerfd::Timer,
 };
 
 pub struct ClientMessage {
@@ -23,11 +31,20 @@ pub struct ClientMessage {
     flush: bool,
 }
 
+pub struct LatMessage {
+    pub id: ClientId,
+    pub tag: u8,
+    pub response: bool,
+    pub ts: u64,
+}
+
 #[derive(Clone)]
 pub struct ClientInfo {
     pub server_addr: SocketAddr,
     pub config: PgClientConfig,
     pub addr_map: Arc<Mutex<AddrMapWriter>>,
+    pub lat_tx: UnboundedSender<LatMessage>,
+    pub should_send_lat: bool,
     pub stats: Arc<ReplayStats>,
     pub disconnect_timeout: Duration,
 }
@@ -160,7 +177,15 @@ async fn client_proc(
     conn_ts: u64,
     mut rx: mpsc::UnboundedReceiver<ClientMessage>,
 ) {
-    if let Err(e) = pacer.until(conn_ts).await {
+    let mut timer = match Timer::new() {
+        Ok(t) => t,
+        Err(e) => {
+            error!("[{me}] failed to create timer: {e}");
+            return;
+        }
+    };
+
+    if let Err(e) = pacer.until(conn_ts, &mut timer).await {
         error!("[{me}] wait failed: {e}");
         return;
     }
@@ -187,10 +212,27 @@ async fn client_proc(
     let (mut reader, mut writer) = client.split();
 
     let read_stats = info.stats.clone();
+    let reader_lat_tx = info.lat_tx.clone();
+    let start_time = quanta::Instant::now();
+
     let mut read_handle = tokio::spawn(async move {
+        let mut lat_send_error = false;
         loop {
             match reader.next_frame().await {
                 Ok(frame) => {
+                    if info.should_send_lat && !lat_send_error {
+                        let ts = start_time.elapsed().as_micros() as u64;
+                        let lat_msg = LatMessage {
+                            id: me,
+                            tag: frame.tag,
+                            response: true,
+                            ts,
+                        };
+                        if let Err(e) = reader_lat_tx.send(lat_msg) {
+                            error!("[{me}] reader failed to send latency: {e}");
+                            lat_send_error = true;
+                        }
+                    }
                     read_stats.log_recv(frame.data.len());
                 }
                 Err(PgClientError::ConnectionClosed) => {
@@ -205,10 +247,24 @@ async fn client_proc(
         }
     });
     let write_loop = async {
+        let mut lat_send_error = false;
         while let Some(msg) = rx.recv().await {
-            if let Err(e) = pacer.until(msg.ts).await {
+            if let Err(e) = pacer.until(msg.ts, &mut timer).await {
                 error!("[{me}] wait failed: {e}");
                 break;
+            }
+            if info.should_send_lat && !lat_send_error {
+                let ts = start_time.elapsed().as_micros() as u64;
+                let lat_msg = LatMessage {
+                    id: me,
+                    tag: msg.tag,
+                    response: false,
+                    ts,
+                };
+                if let Err(e) = info.lat_tx.send(lat_msg) {
+                    error!("[{me}] writer failed to send latency: {e}");
+                    lat_send_error = true;
+                }
             }
             if let Err(e) = writer.send(&msg.data).await {
                 error!("[{me}] send failed: {e}");

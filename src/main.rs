@@ -16,6 +16,7 @@ use crate::capture::read_capture;
 use crate::capture_desc::CaptureDesc;
 use crate::compare::addr_map::AddrMapReader;
 use crate::replay::addr_map::AddrMapWriter;
+use crate::replay::latency::LatencyMap;
 use crate::replay::manager::ReplayManager;
 use crate::utils::files;
 
@@ -50,6 +51,9 @@ enum Commands {
             help = "File to store address mapping (needed for compare)"
         )]
         addr_map: PathBuf,
+
+        #[arg(short, long, value_parser = parse_absolute, help = "File to store latencies")]
+        lat_map: Option<PathBuf>,
 
         #[arg(short, long, default_value = "127.0.0.1", help = "Target server host")]
         host: String,
@@ -182,6 +186,7 @@ async fn run_command(cli: Cli) -> anyhow::Result<()> {
         Commands::Replay {
             input,
             addr_map,
+            lat_map,
             host,
             port,
             dbname,
@@ -195,8 +200,14 @@ async fn run_command(cli: Cli) -> anyhow::Result<()> {
             info!("Map: {}", addr_map.display());
             let map = AddrMapWriter::new(map_file);
             let timeout = Duration::from_secs_f64(timeout);
+            let lat_map = match lat_map {
+                Some(lat_map_path) => Some(LatencyMap::new(
+                    files::try_create_a(&lat_map_path, "lat").await?,
+                )),
+                None => None,
+            };
             let mut mgr = ReplayManager::new(map, host, port, dbname, user, pass, timeout).await?;
-            mgr.replay(reader).await?;
+            mgr.replay(reader, lat_map).await?;
         }
         Commands::Dump { input, output } => {
             let reader = read_capture(&input)?;

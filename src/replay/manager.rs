@@ -5,7 +5,11 @@ use std::{
     time::Duration,
 };
 
-use tokio::{sync::Mutex, task::JoinSet, time::sleep};
+use tokio::{
+    sync::{Mutex, mpsc},
+    task::JoinSet,
+    time::sleep,
+};
 use tracing::{error, info};
 
 use crate::{
@@ -14,13 +18,17 @@ use crate::{
     replay::{
         addr_map::AddrMapWriter,
         client::{ClientInfo, ReplayClient},
+        latency::LatencyMap,
         pacer::Pacer,
         stats::ReplayStats,
     },
 };
 
 pub struct ReplayManager {
-    info: ClientInfo,
+    server_addr: SocketAddr,
+    config: PgClientConfig,
+    addr_map: Arc<Mutex<AddrMapWriter>>,
+    disconnect_timeout: Duration,
     clients: HashMap<ClientId, ReplayClient>,
 }
 
@@ -41,21 +49,31 @@ impl ReplayManager {
             dbname: dbname,
             application_name: "pgr".to_string(),
         };
-        let info = ClientInfo {
-            server_addr: SocketAddr::new(addr, port),
-            config: config,
-            addr_map: Arc::new(Mutex::new(addr_map)),
-            stats: Arc::new(ReplayStats::new()),
-            disconnect_timeout,
-        };
         Ok(Self {
-            info,
+            server_addr: SocketAddr::new(addr, port),
+            config,
+            addr_map: Arc::new(Mutex::new(addr_map)),
+            disconnect_timeout,
             clients: HashMap::new(),
         })
     }
 
-    pub async fn replay(&mut self, mut reader: Box<dyn CaptureReader>) -> anyhow::Result<()> {
-        let stats = self.info.stats.clone();
+    pub async fn replay(
+        &mut self,
+        mut reader: Box<dyn CaptureReader>,
+        lat_map: Option<LatencyMap>,
+    ) -> anyhow::Result<()> {
+        let (lat_tx, mut lat_rx) = mpsc::unbounded_channel();
+        let info = ClientInfo {
+            server_addr: self.server_addr,
+            config: self.config.clone(),
+            addr_map: self.addr_map.clone(),
+            should_send_lat: lat_map.is_some(),
+            lat_tx,
+            stats: Arc::new(ReplayStats::new()),
+            disconnect_timeout: self.disconnect_timeout,
+        };
+        let stats = info.stats.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(1));
             interval.tick().await;
@@ -68,17 +86,39 @@ impl ReplayManager {
                 info!("Total sent: {total} Delta sent: {pps} Delta recv: {recv}");
             }
         });
+        if let Some(mut map) = lat_map {
+            tokio::spawn(async move {
+                loop {
+                    match lat_rx.recv().await {
+                        Some(msg) => {
+                            if msg.response {
+                                if let Err(e) = map.on_response(msg.id, msg.tag, msg.ts).await {
+                                    error!("Failed to write latency: {e}");
+                                    break;
+                                }
+                            } else {
+                                if let Err(e) = map.on_send(msg.id, msg.tag, msg.ts).await {
+                                    error!("Failed to write latency: {e}");
+                                    break;
+                                }
+                            }
+                        }
+                        None => break,
+                    }
+                }
+            });
+        }
 
         let pacer = Pacer::start(0);
         let mut tasks = JoinSet::new();
         loop {
             match reader.next(false) {
                 Ok(data) => {
-                    if let Some(client) = self.ensure_client(data.id, data.ts, &pacer) {
+                    if let Some(client) = self.ensure_client(data.id, &info, &pacer, data.ts) {
                         client.update(data.ts, data.buf, &mut tasks);
                     }
-                    if pacer.time_to(data.ts) > 4_000_000 {
-                        sleep(Duration::from_secs(3)).await;
+                    if pacer.time_to(data.ts) > 2_000_000 {
+                        sleep(Duration::from_micros(1_000_000)).await;
                     }
                 }
                 Err(ReadError::Continue) => (),
@@ -100,13 +140,14 @@ impl ReplayManager {
     fn ensure_client(
         &mut self,
         id: ClientId,
-        first_ts: u64,
+        info: &ClientInfo,
         pacer: &Pacer,
+        first_ts: u64,
     ) -> Option<&mut ReplayClient> {
         let client = self
             .clients
             .entry(id)
-            .or_insert_with(|| ReplayClient::new(id, self.info.clone(), pacer.clone(), first_ts));
+            .or_insert_with(|| ReplayClient::new(id, info.clone(), pacer.clone(), first_ts));
         if client.is_dead() {
             return None;
         }

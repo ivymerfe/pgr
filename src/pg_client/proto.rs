@@ -1,4 +1,4 @@
-use crate::pg_client::error::PgClientError;
+use crate::pg_client::{error::PgClientError, tags};
 
 pub struct BackendFrame<'a> {
     pub tag: u8,
@@ -36,7 +36,7 @@ pub fn try_read_frame(buf: &[u8]) -> Option<(u8, usize)> {
 
 pub fn parse_message(tag: u8, mut data: &[u8]) -> Result<BackendMessage<'_>, PgClientError> {
     Ok(match tag {
-        b'R' => {
+        tags::B_AUTH_REQUEST => {
             if data.len() < 4 {
                 return Err(PgClientError::MalformedMessage);
             }
@@ -56,7 +56,7 @@ pub fn parse_message(tag: u8, mut data: &[u8]) -> Result<BackendMessage<'_>, PgC
                 other => BackendMessage::Authentication(Authentication::Unsupported(other)),
             }
         }
-        b'S' => {
+        tags::B_PARAMETER_STATUS => {
             let (name, rest) = read_cstr(data);
             let (value, _) = read_cstr(rest);
             BackendMessage::ParameterStatus {
@@ -64,7 +64,7 @@ pub fn parse_message(tag: u8, mut data: &[u8]) -> Result<BackendMessage<'_>, PgC
                 _value: value,
             }
         }
-        b'K' => {
+        tags::B_BACKEND_KEY_DATA => {
             if data.len() < 8 {
                 return Err(PgClientError::MalformedMessage);
             }
@@ -75,9 +75,9 @@ pub fn parse_message(tag: u8, mut data: &[u8]) -> Result<BackendMessage<'_>, PgC
                 _secret: secret,
             }
         }
-        b'Z' => BackendMessage::ReadyForQuery,
-        b'E' => BackendMessage::ErrorResponse(read_cstr(data).0),
-        b'N' => BackendMessage::NoticeResponse,
+        tags::B_READY_FOR_QUERY => BackendMessage::ReadyForQuery,
+        tags::B_ERROR => BackendMessage::ErrorResponse(read_cstr(data).0),
+        tags::B_NOTICE => BackendMessage::NoticeResponse,
         other => BackendMessage::Other {
             _tag: other,
             _frame: data,
@@ -87,7 +87,7 @@ pub fn parse_message(tag: u8, mut data: &[u8]) -> Result<BackendMessage<'_>, PgC
 
 pub fn encode_startup(params: &[(String, String)]) -> Vec<u8> {
     let mut body = Vec::new();
-    body.extend_from_slice(&196608i32.to_be_bytes());
+    body.extend_from_slice(&tags::F_PROTO_VERSION.to_be_bytes());
     for (k, v) in params {
         body.extend_from_slice(k.as_bytes());
         body.push(0);
@@ -104,7 +104,7 @@ pub fn encode_startup(params: &[(String, String)]) -> Vec<u8> {
 
 pub fn encode_password(pass: &str) -> Vec<u8> {
     let mut out = Vec::with_capacity(6 + pass.len());
-    out.push(b'p');
+    out.push(tags::F_PASSWORD_MESSAGE);
     out.extend_from_slice(&(4 + pass.len() as i32 + 1).to_be_bytes());
     out.extend_from_slice(pass.as_bytes());
     out.push(0);
