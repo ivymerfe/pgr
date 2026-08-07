@@ -1,7 +1,7 @@
 use crate::{
     capture::{
         frame_buffer::FrameBuffer,
-        reader::{CaptureReader, ReadData, ReadError, ReadResult},
+        reader::{CaptureReader, ClientId, ReadData, ReadError, ReadResult},
     },
     utils::counting_writer::CountingWriter,
 };
@@ -52,7 +52,7 @@ impl AcapMap {
         })
     }
 
-    pub fn get_addr(&self, id: u32) -> Option<&SocketAddr> {
+    pub fn get_addr(&self, id: ClientId) -> Option<&SocketAddr> {
         self.addrs.get(id as usize)
     }
 }
@@ -161,7 +161,7 @@ pub struct AcapReader {
     chunk_idx: u32,
     chunk_reader: Box<dyn Read + Send>,
     payload_buf: Vec<u8>,
-    buffers: HashMap<SocketAddr, FrameBuffer>,
+    buffers: HashMap<ClientId, FrameBuffer>,
     acc_delta: u64,
     curr_delta: u64,
     first_chunk_ts: u64,
@@ -235,11 +235,11 @@ impl AcapReader {
 }
 
 impl CaptureReader for AcapReader {
-    fn get_buffer(&mut self, addr: SocketAddr) -> Option<&mut FrameBuffer> {
-        self.buffers.get_mut(&addr)
+    fn get_buffer(&mut self, id: ClientId) -> Option<&mut FrameBuffer> {
+        self.buffers.get_mut(&id)
     }
 
-    fn next(&mut self) -> ReadResult<'_> {
+    fn next(&mut self, want_addr: bool) -> ReadResult<'_> {
         let (id, ts_abs) = match self.try_next() {
             Ok((id, ts)) => (id, ts),
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Err(ReadError::Eof),
@@ -252,19 +252,22 @@ impl CaptureReader for AcapReader {
         if ts_relative > self.max_duration {
             return Err(ReadError::Eof);
         }
-        if let Some(addr) = self.map.get_addr(id) {
-            let fb = self.buffers.entry(*addr).or_default();
-            if self.payload_buf.is_empty() {
-                fb.mark_connection_start();
-            } else {
-                fb.extend(&self.payload_buf);
-            }
-            return Ok(ReadData {
-                addr: addr.clone(),
-                ts: ts_relative,
-                buf: fb,
-            });
+        let fb = self.buffers.entry(id).or_default();
+        if self.payload_buf.is_empty() {
+            fb.mark_connection_start();
+        } else {
+            fb.extend(&self.payload_buf);
         }
-        Err(ReadError::Error(format!("Unknown id: {}", id)))
+        let addr = if want_addr {
+            self.map.get_addr(id).cloned()
+        } else {
+            None
+        };
+        return Ok(ReadData {
+            id,
+            ts: ts_relative,
+            addr,
+            buf: fb,
+        });
     }
 }

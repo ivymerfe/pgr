@@ -9,10 +9,10 @@ use tokio::{sync::Mutex, task::JoinSet, time::sleep};
 use tracing::{error, info};
 
 use crate::{
-    capture::reader::{CaptureReader, ReadError},
+    capture::reader::{CaptureReader, ClientId, ReadError},
     pg_client::PgClientConfig,
     replay::{
-        addr_map::AddrMap,
+        addr_map::AddrMapWriter,
         client::{ClientInfo, ReplayClient},
         pacer::Pacer,
         stats::ReplayStats,
@@ -21,12 +21,12 @@ use crate::{
 
 pub struct ReplayManager {
     info: ClientInfo,
-    clients: HashMap<SocketAddr, ReplayClient>,
+    clients: HashMap<ClientId, ReplayClient>,
 }
 
 impl ReplayManager {
     pub async fn new(
-        addr_map: AddrMap,
+        addr_map: AddrMapWriter,
         host: String,
         port: u16,
         dbname: String,
@@ -72,9 +72,9 @@ impl ReplayManager {
         let pacer = Pacer::start(0);
         let mut tasks = JoinSet::new();
         loop {
-            match reader.next() {
+            match reader.next(false) {
                 Ok(data) => {
-                    if let Some(client) = self.ensure_client(data.addr, data.ts, &pacer) {
+                    if let Some(client) = self.ensure_client(data.id, data.ts, &pacer) {
                         client.update(data.ts, data.buf, &mut tasks);
                     }
                     if pacer.time_to(data.ts) > 4_000_000 {
@@ -99,14 +99,14 @@ impl ReplayManager {
 
     fn ensure_client(
         &mut self,
-        addr: SocketAddr,
+        id: ClientId,
         first_ts: u64,
         pacer: &Pacer,
     ) -> Option<&mut ReplayClient> {
         let client = self
             .clients
-            .entry(addr)
-            .or_insert_with(|| ReplayClient::new(addr, self.info.clone(), pacer.clone(), first_ts));
+            .entry(id)
+            .or_insert_with(|| ReplayClient::new(id, self.info.clone(), pacer.clone(), first_ts));
         if client.is_dead() {
             return None;
         }

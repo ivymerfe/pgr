@@ -8,9 +8,12 @@ use tokio::{
 use tracing::{error, info, warn};
 
 use crate::{
-    capture::frame_buffer::{ConnState, FrameBuffer, FrameResult},
+    capture::{
+        frame_buffer::{ConnState, FrameBuffer, FrameResult},
+        reader::ClientId,
+    },
     pg_client::{PgClient, PgClientConfig, error::PgClientError},
-    replay::{addr_map::AddrMap, pacer::Pacer, stats::ReplayStats},
+    replay::{addr_map::AddrMapWriter, pacer::Pacer, stats::ReplayStats},
 };
 
 pub struct ClientMessage {
@@ -24,13 +27,13 @@ pub struct ClientMessage {
 pub struct ClientInfo {
     pub server_addr: SocketAddr,
     pub config: PgClientConfig,
-    pub addr_map: Arc<Mutex<AddrMap>>,
+    pub addr_map: Arc<Mutex<AddrMapWriter>>,
     pub stats: Arc<ReplayStats>,
     pub disconnect_timeout: Duration,
 }
 
 pub struct ReplayClient {
-    addr: SocketAddr,
+    id: ClientId,
     info: ClientInfo,
     pacer: Pacer,
     first_ts: u64,
@@ -41,9 +44,9 @@ pub struct ReplayClient {
 }
 
 impl ReplayClient {
-    pub fn new(addr: SocketAddr, info: ClientInfo, pacer: Pacer, first_ts: u64) -> Self {
+    pub fn new(id: ClientId, info: ClientInfo, pacer: Pacer, first_ts: u64) -> Self {
         Self {
-            addr,
+            id,
             info,
             pacer,
             first_ts,
@@ -63,7 +66,7 @@ impl ReplayClient {
             match chan.send(msg) {
                 Ok(()) => (),
                 Err(_) => {
-                    warn!("[{}] channel send failed", self.addr);
+                    warn!("[{}] channel send failed", self.id);
                     return false;
                 }
             }
@@ -88,7 +91,7 @@ impl ReplayClient {
                     return;
                 }
                 FrameResult::Desync => {
-                    warn!("[{}] desync", self.addr);
+                    warn!("[{}] desync", self.id);
                     buf.resync();
                 }
             }
@@ -100,7 +103,7 @@ impl ReplayClient {
             let (tx, rx) = mpsc::unbounded_channel();
             self.chan = Some(tx);
             tasks.spawn(client_proc(
-                self.addr,
+                self.id,
                 self.info.clone(),
                 self.pacer.clone(),
                 conn_ts,
@@ -137,7 +140,7 @@ impl ReplayClient {
                     return;
                 }
                 FrameResult::Desync => {
-                    warn!("[{}] desync", self.addr);
+                    warn!("[{}] desync", self.id);
                     buf.resync();
                 }
             }
@@ -151,7 +154,7 @@ impl ReplayClient {
 }
 
 async fn client_proc(
-    me: SocketAddr,
+    me: ClientId,
     info: ClientInfo,
     pacer: Pacer,
     conn_ts: u64,

@@ -14,8 +14,8 @@ use tracing_subscriber::fmt::time::OffsetTime;
 use crate::capture::acap::AcapWriter;
 use crate::capture::read_capture;
 use crate::capture_desc::CaptureDesc;
-use crate::compare::pair::PairMap;
-use crate::replay::addr_map::AddrMap;
+use crate::compare::addr_map::AddrMapReader;
+use crate::replay::addr_map::AddrMapWriter;
 use crate::replay::manager::ReplayManager;
 use crate::utils::files;
 
@@ -193,7 +193,7 @@ async fn run_command(cli: Cli) -> anyhow::Result<()> {
             let reader = read_capture(&input)?;
             info!("Replaying {input} -> {host}:{port} dbname={dbname} user={user}");
             info!("Map: {}", addr_map.display());
-            let map = AddrMap::new(map_file);
+            let map = AddrMapWriter::new(map_file);
             let timeout = Duration::from_secs_f64(timeout);
             let mut mgr = ReplayManager::new(map, host, port, dbname, user, pass, timeout).await?;
             mgr.replay(reader).await?;
@@ -215,7 +215,7 @@ async fn run_command(cli: Cli) -> anyhow::Result<()> {
             let map_file = files::try_open(&addr_map)?;
             info!("Comparing {} <-> {}", src, replay);
             info!("Map: {}", addr_map.display());
-            let mut map = PairMap::new(map_file)?;
+            let mut map = AddrMapReader::new(map_file)?;
             let mut delta_writer = None;
             if let Some(delta) = delta {
                 let file = files::try_create(&delta, "csv")?;

@@ -4,7 +4,7 @@ use std::{collections::HashMap, io::Read, net::SocketAddr};
 
 use crate::capture::{
     frame_buffer::FrameBuffer,
-    reader::{CaptureReader, ReadData, ReadError, ReadResult},
+    reader::{CaptureReader, ClientId, ReadData, ReadError, ReadResult},
     reassembler::Reassembler,
 };
 
@@ -27,11 +27,11 @@ pub struct PcapReader<'a> {
     max_duration: u64,
     consume: usize,
     refill: bool,
-    handlers: HashMap<SocketAddr, PcapClient>,
+    clients: HashMap<ClientId, PcapClient>,
+    id_to_addr: HashMap<ClientId, SocketAddr>,
+    addr_to_id: HashMap<SocketAddr, ClientId>,
+    next_id: u32,
     pub first_ts: u64,
-    pub packet_count: usize,
-    pub bytes_read: usize,
-    pub fail_count: usize,
 }
 
 impl<'a> PcapReader<'a> {
@@ -48,11 +48,11 @@ impl<'a> PcapReader<'a> {
             max_duration,
             consume: 0,
             refill: false,
-            handlers: HashMap::new(),
+            clients: HashMap::new(),
+            id_to_addr: HashMap::new(),
+            addr_to_id: HashMap::new(),
+            next_id: 0,
             first_ts: 0,
-            packet_count: 0,
-            bytes_read: 0,
-            fail_count: 0,
         })
     }
 }
@@ -64,11 +64,11 @@ impl From<PcapError<&[u8]>> for ReadError {
 }
 
 impl<'a> CaptureReader for PcapReader<'a> {
-    fn get_buffer(&mut self, addr: SocketAddr) -> Option<&mut FrameBuffer> {
-        self.handlers.get_mut(&addr).map(|h| &mut h.fb)
+    fn get_buffer(&mut self, id: ClientId) -> Option<&mut FrameBuffer> {
+        self.clients.get_mut(&id).map(|h| &mut h.fb)
     }
 
-    fn next(&mut self) -> ReadResult<'_> {
+    fn next(&mut self, _want_addr: bool) -> ReadResult<'_> {
         if self.consume > 0 {
             self.pcap.consume_noshift(self.consume);
             self.consume = 0;
@@ -79,10 +79,8 @@ impl<'a> CaptureReader for PcapReader<'a> {
         }
         match self.pcap.next() {
             Ok((consumed, block)) => {
-                self.bytes_read += consumed;
                 self.consume += consumed;
                 if let Some(packet) = process_block(block, self.port) {
-                    self.packet_count += 1;
                     if self.first_ts == 0 {
                         self.first_ts = packet.ts;
                     }
@@ -94,7 +92,14 @@ impl<'a> CaptureReader for PcapReader<'a> {
                     if ts_relative > self.max_duration {
                         return Err(ReadError::Eof);
                     }
-                    let client = self.handlers.entry(packet.addr).or_default();
+                    let addr = packet.addr;
+                    let id = self.addr_to_id.entry(addr).or_insert_with(|| {
+                        let id = self.next_id;
+                        self.next_id += 1;
+                        self.id_to_addr.insert(id, addr);
+                        id
+                    });
+                    let client = self.clients.entry(*id).or_default();
                     let tcp = packet.tcp;
                     let fb = &mut client.fb;
                     if tcp.syn() {
@@ -107,13 +112,12 @@ impl<'a> CaptureReader for PcapReader<'a> {
                         &mut fb.data,
                     ) {
                         return Ok(ReadData {
-                            addr: packet.addr,
+                            id: *id,
                             ts: ts_relative,
+                            addr: Some(addr),
                             buf: fb,
                         });
                     }
-                } else {
-                    self.fail_count += 1;
                 }
             }
             Err(PcapError::Eof) => return Err(ReadError::Eof),

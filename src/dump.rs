@@ -13,7 +13,7 @@ pub fn dump(mut reader: Box<dyn CaptureReader>, output: File) -> anyhow::Result<
     let mut writer = BufWriter::with_capacity(131072, output);
 
     loop {
-        match reader.next() {
+        match reader.next(false) {
             Ok(mut data) => loop {
                 let buf = &mut data.buf;
                 match buf.find_frame() {
@@ -23,7 +23,7 @@ pub fn dump(mut reader: Box<dyn CaptureReader>, output: File) -> anyhow::Result<
                             writer,
                             "{:.6},{},{}",
                             data.ts as f64 / 1e6,
-                            data.addr,
+                            data.id,
                             TagFrame(info.tag, frame)
                         )?;
                         buf.consume_frame(&info);
@@ -31,7 +31,7 @@ pub fn dump(mut reader: Box<dyn CaptureReader>, output: File) -> anyhow::Result<
                     }
                     FrameResult::Incomplete => break,
                     FrameResult::Desync => {
-                        warn!("[{}] desync", data.addr);
+                        warn!("[{}] desync", data.id);
                         buf.resync();
                     }
                 }
