@@ -7,12 +7,14 @@ use aya_log::EbpfLogger;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::os::unix::io::AsRawFd;
+use std::sync::Arc;
 
 use capture_common::{CHUNK_SIZE, CaptureEvent, Config};
 use tracing::{error, info};
 
 use crate::capture::acap::AcapWriter;
 use crate::capture::reassembler::Reassembler;
+use crate::utils::waker::Waker;
 
 const TCP_FLAG_SYN: u8 = 0x02;
 
@@ -20,18 +22,17 @@ pub struct CaptureHandle {
     pub _ebpf: Ebpf,
     pub buf: RingBuf<MapData>,
     pub baseline_ns: u64,
-    pub stop_evfd: i32,
+    pub stop_waker: Arc<Waker>,
 }
 
 pub fn run_capture(writer: AcapWriter, interface: &str, port: u16) -> anyhow::Result<()> {
     let capture = start_capture(interface, port)?;
     info!("Capture started");
 
-    let evfd = capture.stop_evfd;
+    let waker = capture.stop_waker.clone();
     ctrlc::set_handler(move || {
-        let val: u64 = 1;
-        unsafe {
-            libc::write(evfd, &val as *const u64 as *const libc::c_void, 8);
+        if let Err(e) = waker.wake() {
+            error!("Failed to stop capture: {e}");
         }
     })
     .expect("Error setting Ctrl-C handler");
@@ -57,17 +58,11 @@ fn start_capture(iface: &str, dst_port: u16) -> anyhow::Result<CaptureHandle> {
     let baseline_ns = monotonic_ns();
     info!("Loaded program");
 
-    let stop_evfd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK) };
-    if stop_evfd < 0 {
-        return Err(anyhow::anyhow!(
-            "eventfd failed: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
+    let stop_waker = Arc::new(Waker::new()?);
 
     let mut logger = EbpfLogger::init(&mut ebpf).unwrap();
     let logger_fd = logger.as_raw_fd();
-    let logger_evfd = unsafe { libc::dup(stop_evfd) };
+    let logger_stop = stop_waker.dup()?;
 
     std::thread::spawn(move || {
         let mut fds = [
@@ -77,7 +72,7 @@ fn start_capture(iface: &str, dst_port: u16) -> anyhow::Result<CaptureHandle> {
                 revents: 0,
             },
             libc::pollfd {
-                fd: logger_evfd,
+                fd: logger_stop.fd(),
                 events: libc::POLLIN,
                 revents: 0,
             },
@@ -100,14 +95,12 @@ fn start_capture(iface: &str, dst_port: u16) -> anyhow::Result<CaptureHandle> {
                 logger.flush();
             }
         }
-
-        unsafe { libc::close(logger_evfd) };
     });
     Ok(CaptureHandle {
         _ebpf: ebpf,
         buf: ring_buf,
         baseline_ns,
-        stop_evfd,
+        stop_waker,
     })
 }
 
@@ -131,7 +124,7 @@ fn write_capture(capture: CaptureHandle, mut writer: AcapWriter) {
             revents: 0,
         },
         libc::pollfd {
-            fd: capture.stop_evfd,
+            fd: capture.stop_waker.fd(),
             events: libc::POLLIN,
             revents: 0,
         },
@@ -199,7 +192,6 @@ fn write_capture(capture: CaptureHandle, mut writer: AcapWriter) {
             }
         }
     }
-    unsafe { libc::close(capture.stop_evfd) };
     if let Err(e) = writer.finish() {
         error!("Failed to finish writing: {e}");
     }

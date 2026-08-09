@@ -1,7 +1,6 @@
 use std::{collections::HashMap, sync::Arc, thread::sleep, time::Duration};
 
 use crossbeam_channel::{Sender, unbounded};
-use mio::Waker;
 use quanta::Instant;
 use tracing::{error, info, warn};
 
@@ -17,6 +16,7 @@ use crate::{
         r#loop::{ConnCommand, ReplayLoop},
         stats::ReplayStats,
     },
+    utils::waker::Waker,
 };
 
 struct ClientInfo {
@@ -74,7 +74,9 @@ impl ReplayManager {
                         found_startup: false,
                         connected: false,
                     });
-                    Self::forward_frames(client, data.ts, data.buf, &cmd_tx, &waker);
+                    if !Self::forward_frames(client, data.ts, data.buf, &cmd_tx, &waker) {
+                        break;
+                    }
 
                     let elapsed_us = start.elapsed().as_micros() as u64;
                     if data.ts.saturating_sub(elapsed_us) > 1_000_000 {
@@ -92,21 +94,23 @@ impl ReplayManager {
         drop(cmd_tx);
 
         info!("Finished reading");
-        if let Err(e) = conn_handle.join() {
-            error!("join failed: {e:?}");
+        if let Err(_) = conn_handle.join() {
+            error!("join failed, conn thread gone");
         }
 
         Ok(())
     }
 
-    fn send_cmd(cmd_tx: &Sender<ConnCommand>, waker: &mio::Waker, cmd: ConnCommand) {
+    fn send_cmd(cmd_tx: &Sender<ConnCommand>, waker: &Arc<Waker>, cmd: ConnCommand) -> bool {
         if cmd_tx.send(cmd).is_err() {
             error!("ctl thread gone, dropping command");
-            return;
+            return false;
         }
         if let Err(e) = waker.wake() {
             error!("failed to wake ctl: {e}");
+            return false;
         }
+        return true;
     }
 
     fn forward_frames(
@@ -114,8 +118,8 @@ impl ReplayManager {
         ts: u64,
         buf: &mut crate::capture::frame_buffer::FrameBuffer,
         cmd_tx: &Sender<ConnCommand>,
-        waker: &Waker,
-    ) {
+        waker: &Arc<Waker>,
+    ) -> bool {
         while buf.state != ConnState::Normal && buf.state != ConnState::CopyIn {
             match buf.find_frame() {
                 FrameResult::Complete(info) => {
@@ -125,7 +129,7 @@ impl ReplayManager {
                     buf.consume_frame(&info);
                 }
                 FrameResult::Incomplete => {
-                    return;
+                    return true;
                 }
                 FrameResult::Desync => {
                     warn!("[{}] desync", client.id);
@@ -139,7 +143,9 @@ impl ReplayManager {
             } else {
                 0
             };
-            Self::send_cmd(cmd_tx, waker, ConnCommand::Connect { id: client.id, ts });
+            if !Self::send_cmd(cmd_tx, waker, ConnCommand::Connect { id: client.id, ts }) {
+                return false;
+            }
             client.connected = true;
         }
         let mut ready_frame: Option<(u8, Vec<u8>)> = None;
@@ -147,17 +153,16 @@ impl ReplayManager {
             match buf.find_frame() {
                 FrameResult::Complete(info) => {
                     if let Some((tag, data)) = ready_frame.take() {
-                        Self::send_cmd(
-                            cmd_tx,
-                            waker,
-                            ConnCommand::Send {
-                                id: client.id,
-                                ts,
-                                tag,
-                                data,
-                                flush: false,
-                            },
-                        );
+                        let cmd = ConnCommand::Send {
+                            id: client.id,
+                            ts,
+                            tag,
+                            data,
+                            flush: false,
+                        };
+                        if !Self::send_cmd(cmd_tx, waker, cmd) {
+                            return false;
+                        }
                     }
                     let data = buf.read_frame_full(&info).to_vec();
                     ready_frame = Some((info.tag, data));
@@ -166,22 +171,22 @@ impl ReplayManager {
                 }
                 FrameResult::Incomplete => {
                     if let Some((tag, data)) = ready_frame.take() {
-                        Self::send_cmd(
-                            cmd_tx,
-                            waker,
-                            ConnCommand::Send {
-                                id: client.id,
-                                ts,
-                                tag,
-                                data,
-                                flush: true,
-                            },
-                        );
+                        let cmd = ConnCommand::Send {
+                            id: client.id,
+                            ts,
+                            tag,
+                            data,
+                            flush: true,
+                        };
+                        if !Self::send_cmd(cmd_tx, waker, cmd) {
+                            return false;
+                        }
                     }
                     break;
                 }
                 FrameResult::Desync => buf.resync(),
             }
         }
+        return true;
     }
 }
