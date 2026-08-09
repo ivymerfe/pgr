@@ -1,9 +1,4 @@
-use crate::pg_client::{error::PgClientError, tags};
-
-pub struct BackendFrame<'a> {
-    pub tag: u8,
-    pub data: &'a [u8],
-}
+use crate::proto::tags;
 
 pub enum BackendMessage<'a> {
     Authentication(Authentication),
@@ -34,11 +29,11 @@ pub fn try_read_frame(buf: &[u8]) -> Option<(u8, usize)> {
     Some((buf[0], frame_len))
 }
 
-pub fn parse_message(tag: u8, mut data: &[u8]) -> Result<BackendMessage<'_>, PgClientError> {
+pub fn parse_message(tag: u8, mut data: &[u8]) -> Result<BackendMessage<'_>, ()> {
     Ok(match tag {
         tags::B_AUTH_REQUEST => {
             if data.len() < 4 {
-                return Err(PgClientError::MalformedMessage);
+                return Err(());
             }
             let code = i32::from_be_bytes([data[0], data[1], data[2], data[3]]);
             data = &data[4..];
@@ -47,7 +42,7 @@ pub fn parse_message(tag: u8, mut data: &[u8]) -> Result<BackendMessage<'_>, PgC
                 3 => BackendMessage::Authentication(Authentication::Cleartext),
                 5 => {
                     if data.len() < 4 {
-                        return Err(PgClientError::MalformedMessage);
+                        return Err(());
                     }
                     let mut salt = [0u8; 4];
                     salt.copy_from_slice(&data[..4]);
@@ -66,7 +61,7 @@ pub fn parse_message(tag: u8, mut data: &[u8]) -> Result<BackendMessage<'_>, PgC
         }
         tags::B_BACKEND_KEY_DATA => {
             if data.len() < 8 {
-                return Err(PgClientError::MalformedMessage);
+                return Err(());
             }
             let pid = i32::from_be_bytes([data[0], data[1], data[2], data[3]]);
             let secret = i32::from_be_bytes([data[4], data[5], data[6], data[7]]);

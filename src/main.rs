@@ -3,6 +3,7 @@ use bytesize::ByteSize;
 use clap::{Parser, Subcommand};
 
 use std::io::BufWriter;
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 use std::{env, fs};
@@ -16,6 +17,7 @@ use crate::capture::read_capture;
 use crate::capture_desc::CaptureDesc;
 use crate::compare::addr_map::AddrMapReader;
 use crate::replay::addr_map::AddrMapWriter;
+use crate::replay::client::ReplayConfig;
 use crate::replay::latency::LatencyMap;
 use crate::replay::manager::ReplayManager;
 use crate::utils::files;
@@ -25,7 +27,7 @@ mod capture_desc;
 mod compare;
 mod dump;
 mod parser;
-mod pg_client;
+mod proto;
 mod replay;
 mod utils;
 mod zstd_test;
@@ -56,7 +58,7 @@ enum Commands {
         lat_map: Option<PathBuf>,
 
         #[arg(short, long, default_value = "127.0.0.1", help = "Target server host")]
-        host: String,
+        host: IpAddr,
 
         #[arg(short, long, default_value_t = 5432, help = "Target server port")]
         port: u16,
@@ -159,8 +161,7 @@ enum Commands {
     },
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let local_offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
 
@@ -171,7 +172,7 @@ async fn main() -> anyhow::Result<()> {
         .with_target(false)
         .init();
 
-    match run_command(cli).await {
+    match run_command(cli) {
         Ok(()) => (),
         Err(e) => {
             error!("{}", e);
@@ -181,7 +182,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn run_command(cli: Cli) -> anyhow::Result<()> {
+fn run_command(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Commands::Replay {
             input,
@@ -194,20 +195,21 @@ async fn run_command(cli: Cli) -> anyhow::Result<()> {
             pass,
             timeout,
         } => {
-            let map_file = files::try_create_a(&addr_map, "csv").await?;
+            let map_file = files::try_create(&addr_map, "csv")?;
             let reader = read_capture(&input)?;
             info!("Replaying {input} -> {host}:{port} dbname={dbname} user={user}");
             info!("Map: {}", addr_map.display());
             let map = AddrMapWriter::new(map_file);
             let timeout = Duration::from_secs_f64(timeout);
             let lat_map = match lat_map {
-                Some(lat_map_path) => Some(LatencyMap::new(
-                    files::try_create_a(&lat_map_path, "lat").await?,
-                )),
+                Some(lat_map_path) => {
+                    Some(LatencyMap::new(files::try_create(&lat_map_path, "lat")?))
+                }
                 None => None,
             };
-            let mut mgr = ReplayManager::new(map, host, port, dbname, user, pass, timeout).await?;
-            mgr.replay(reader, lat_map).await?;
+            let config = ReplayConfig::new(host, port, dbname, user, pass, timeout);
+            let mut mgr = ReplayManager::new();
+            mgr.replay(config, reader, map, lat_map)?;
         }
         Commands::Dump { input, output } => {
             let reader = read_capture(&input)?;
@@ -266,7 +268,7 @@ async fn run_command(cli: Cli) -> anyhow::Result<()> {
                 max_chunk, level, zw
             );
             let writer = AcapWriter::new(output, max_chunk.as_u64(), level, zw)?;
-            capture::run_capture(writer, &interface, port).await?
+            capture::ebpf::run_capture(writer, &interface, port)?
         }
         Commands::Compress {
             input,

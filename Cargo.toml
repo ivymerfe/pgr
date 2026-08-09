@@ -19,19 +19,18 @@ etherparse = "0.21.0"
 md5 = "0.8.1"
 pcap-parser = "0.17.0"
 time = { version = "0.3.54", features = ["formatting", "macros", "local-offset"] }
-tokio = { version = "1.53.0", features = ["full"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["fmt", "time"] }
 zstd = {version = "0.13.3", features = ["zstdmt"] }
 libc = "0.2.189"
-rustix = {version = "1.1.4", features = ["time"] }
-tokio-util = "0.7.19"
 crossbeam-channel = "0.5.16"
 anyhow = "1.0.104"
 bytesize = "2.7.0"
 aya-log = "0.3.0"
 humantime = "2.4.0"
 quanta = "0.12.6"
+mio = { version = "1.2.2", features = ["net", "os-poll"] }
+ctrlc = "3.5.2"
 
 [build-dependencies]
 cargo_metadata = "0.23.1"

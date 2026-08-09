@@ -1,11 +1,9 @@
 use std::collections::{HashMap, VecDeque};
-use tokio::{
-    fs::File,
-    io::{AsyncWriteExt, BufWriter},
-};
+use std::fs::File;
+use std::io::{BufWriter, Write};
 
 use crate::capture::reader::ClientId;
-use crate::pg_client::tags::*;
+use crate::proto::tags::*;
 
 pub struct LatencyMap {
     writer: BufWriter<File>,
@@ -20,13 +18,13 @@ impl LatencyMap {
         }
     }
 
-    pub async fn on_send(&mut self, id: ClientId, tag: u8, ts: u64) -> tokio::io::Result<()> {
+    pub async fn on_send(&mut self, id: ClientId, tag: u8, ts: u64) -> std::io::Result<()> {
         let mon = self.monitors.entry(id).or_default();
         mon.on_send(tag, ts);
         Ok(())
     }
 
-    pub async fn on_response(&mut self, id: ClientId, tag: u8, ts: u64) -> tokio::io::Result<()> {
+    pub async fn on_response(&mut self, id: ClientId, tag: u8, ts: u64) -> std::io::Result<()> {
         let mon = self.monitors.entry(id).or_default();
         if let Some((f_tag, lat)) = mon.on_response(tag, ts) {
             let pending = mon.pending.len();
@@ -35,12 +33,25 @@ impl LatencyMap {
         Ok(())
     }
 
-    pub async fn write(&mut self, id: ClientId, tag: u8, lat_us: u32, pending: usize) -> tokio::io::Result<()> {
+    pub async fn write(
+        &mut self,
+        id: ClientId,
+        tag: u8,
+        lat_us: u32,
+        pending: usize,
+    ) -> std::io::Result<()> {
         // self.writer.write_u32(id).await?;
         // self.writer.write_u32(lat_us).await?
-        self.writer
-            .write_all(format!("{},{},{:.3},{}\n", id, tag as char, (lat_us as f32) / 1e3, pending).as_bytes())
-            .await?;
+        self.writer.write_all(
+            format!(
+                "{},{},{:.3},{}\n",
+                id,
+                tag as char,
+                (lat_us as f32) / 1e3,
+                pending
+            )
+            .as_bytes(),
+        )?;
         Ok(())
     }
 }

@@ -4,3 +4,5 @@
 /zz_*/
 *.pcap
 *.csv
+*.lat
+*.json.gz

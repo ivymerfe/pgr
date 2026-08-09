@@ -18,15 +18,3 @@ pub fn try_create(path: &PathBuf, ext: &str) -> anyhow::Result<std::fs::File> {
         .with_context(|| format!("Failed to create file: '{}'", path.display(),))?;
     Ok(file)
 }
-
-pub async fn try_create_a(path: &PathBuf, ext: &str) -> anyhow::Result<tokio::fs::File> {
-    let path = if path.extension().is_none() {
-        &path.with_extension(ext)
-    } else {
-        path
-    };
-    let file = tokio::fs::File::create(&path)
-        .await
-        .with_context(|| format!("Failed to open file: '{}'", path.display(),))?;
-    Ok(file)
-}

@@ -1,5 +1,4 @@
-use std::net::SocketAddr;
-use tokio::{fs::File, io::AsyncWriteExt};
+use std::{fs::File, io::Write, net::SocketAddr};
 
 use crate::capture::reader::ClientId;
 
@@ -12,13 +11,9 @@ impl AddrMapWriter {
         Self { file }
     }
 
-    pub async fn write(
-        &mut self,
-        id: ClientId,
-        replay_addr: SocketAddr,
-    ) -> Result<(), std::io::Error> {
+    pub fn write(&mut self, id: ClientId, replay_addr: SocketAddr) -> Result<(), std::io::Error> {
         let entry = format!("{id},{replay_addr}\n");
-        self.file.write_all(entry.as_bytes()).await?;
+        self.file.write_all(entry.as_bytes())?;
         Ok(())
     }
 }

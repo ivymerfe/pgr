@@ -20,8 +20,8 @@ impl ReplayStats {
         self.delta_req.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub fn log_recv(&self, sz: usize) {
-        self.delta_recv.fetch_add(sz as u64, Ordering::Relaxed);
+    pub fn log_recv(&self) {
+        self.delta_recv.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn read_total_sent(&self) -> u64 {
