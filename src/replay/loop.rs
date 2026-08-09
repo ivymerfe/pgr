@@ -14,6 +14,7 @@ use crate::capture::reader::ClientId;
 use crate::replay::addr_map::AddrMapWriter;
 use crate::replay::client::{ClientState, NewConnection, ReplayClient, ReplayConfig};
 use crate::replay::stats::ReplayStats;
+use crate::utils::stream::Stream;
 use crate::utils::waker::Waker;
 
 const OP_WAKE: u64 = u64::MAX;
@@ -54,7 +55,8 @@ struct Connection {
     client: ReplayClient,
     read_buf: Vec<u8>,
     read_in_flight: bool,
-    write_in_flight: Option<Vec<u8>>,
+    write_stream: Stream,
+    write_in_flight: bool,
 }
 
 pub struct ReplayLoop {
@@ -275,7 +277,7 @@ impl ReplayLoop {
                 ..
             } => {
                 if let Some(conn) = self.connections.get_mut(&id) {
-                    conn.client.send_frame(tag, data);
+                    conn.client.send_frame(tag, &data);
                     if flush {
                         self.submit_write(id);
                     }
@@ -301,9 +303,10 @@ impl ReplayLoop {
         let conn = Connection {
             socket,
             client,
-            read_buf: vec![0u8; READ_BUF_SIZE],
+            read_buf: vec![0; READ_BUF_SIZE],
             read_in_flight: false,
-            write_in_flight: None,
+            write_stream: Stream::new(READ_BUF_SIZE),
+            write_in_flight: false,
         };
         self.connections.insert(id, conn);
 
@@ -354,10 +357,12 @@ impl ReplayLoop {
             Some(c) => c,
             None => return,
         };
-        if conn.write_in_flight.is_some() || !conn.client.has_pending_write() {
+        if conn.write_in_flight {
             return;
         }
-        let buf = conn.client.take_outbox();
+        conn.write_stream.write(conn.client.read_outbox());
+        conn.client.clear_outbox();
+        let buf = &conn.write_stream.data();
         if buf.is_empty() {
             return;
         }
@@ -370,12 +375,11 @@ impl ReplayLoop {
             .user_data(make_ud(KIND_WRITE, id));
         unsafe {
             if self.ring.submission().push(&entry).is_err() {
-                conn.client.requeue_unwritten(buf);
                 self.pending_writes.push_back(id);
                 return;
             }
         }
-        conn.write_in_flight = Some(buf);
+        conn.write_in_flight = true;
     }
 
     fn process_completions(&mut self) {
@@ -465,17 +469,14 @@ impl ReplayLoop {
             Some(c) => c,
             None => return,
         };
-        let sent = conn.write_in_flight.take().unwrap_or_default();
-        conn.write_in_flight = None;
+        conn.write_in_flight = false;
 
         if result < 0 {
             let e = io::Error::from_raw_os_error(-result);
             conn.client.on_io_error(e);
         } else {
             let n = result as usize;
-            if n < sent.len() {
-                conn.client.requeue_unwritten(sent[n..].to_vec());
-            }
+            conn.write_stream.mark_read(n);
         }
 
         if conn.client.state == ClientState::Dead {

@@ -9,6 +9,7 @@ use tracing::{error, info};
 use crate::capture::reader::ClientId;
 use crate::proto::{self, Authentication, BackendMessage, tags};
 use crate::replay::stats::ReplayStats;
+use crate::utils::stream::Stream;
 
 #[derive(Clone)]
 pub struct ReplayConfig {
@@ -25,11 +26,6 @@ pub enum ClientState {
     Connecting,
     Normal,
     Dead,
-}
-
-struct PendingFrame {
-    tag: u8,
-    data: Vec<u8>,
 }
 
 impl ReplayConfig {
@@ -52,6 +48,16 @@ impl ReplayConfig {
     }
 }
 
+struct PendingFrame {
+    tag: u8,
+    len: usize,
+}
+
+struct PendingFrameData {
+    tag: u8,
+    data: Vec<u8>,
+}
+
 pub struct ReplayClient {
     pub id: ClientId,
     pub config: ReplayConfig,
@@ -59,12 +65,12 @@ pub struct ReplayClient {
     pub state: ClientState,
     pub stats: Arc<ReplayStats>,
 
+    pre_connect_frames: Vec<PendingFrameData>,
     pending_frames: VecDeque<PendingFrame>,
     waiting_for_sync: bool,
 
-    parse_buf: Vec<u8>,
-    parsed: usize,
-    outbox: Vec<u8>,
+    parse_stream: Stream,
+    outbox: Stream,
 }
 
 pub struct NewConnection {
@@ -93,11 +99,11 @@ impl ReplayClient {
             stats,
             addr,
             state: ClientState::Connecting,
+            pre_connect_frames: Vec::new(),
             pending_frames: VecDeque::new(),
             waiting_for_sync: false,
-            parse_buf: Vec::with_capacity(65536),
-            parsed: 0,
-            outbox: Vec::with_capacity(65536),
+            parse_stream: Stream::new(65536),
+            outbox: Stream::new(65536),
         };
         client.queue_startup();
 
@@ -109,7 +115,7 @@ impl ReplayClient {
     }
 
     fn handle_frame(&mut self, tag: u8, offset: usize, len: usize) {
-        let data = &self.parse_buf[self.parsed + offset..self.parsed + len];
+        let data = &self.parse_stream.data()[offset..len];
         if self.state == ClientState::Connecting {
             match proto::parse_message(tag, data) {
                 Ok(msg) => match msg {
@@ -120,7 +126,10 @@ impl ReplayClient {
                     BackendMessage::ReadyForQuery => {
                         info!("[{}] connected: {}", self.id, self.addr);
                         self.state = ClientState::Normal;
-                        self.send_pending();
+                        let frames = std::mem::take(&mut self.pre_connect_frames);
+                        for frame in frames {
+                            self.send_frame(frame.tag, &frame.data);
+                        }
                     }
                     _ => {}
                 },
@@ -139,16 +148,10 @@ impl ReplayClient {
     }
 
     pub fn on_read(&mut self, data: &[u8]) {
-        if self.parsed > 65536 {
-            let remaining = self.parse_buf.len() - self.parsed;
-            self.parse_buf.copy_within(self.parsed.., 0);
-            self.parse_buf.truncate(remaining);
-            self.parsed = 0;
-        }
-        self.parse_buf.extend_from_slice(data);
-        while let Some((tag, frame_len)) = proto::try_read_frame(&self.parse_buf[self.parsed..]) {
+        self.parse_stream.write(data);
+        while let Some((tag, frame_len)) = proto::try_read_frame(self.parse_stream.data()) {
             self.handle_frame(tag, 5, frame_len);
-            self.parsed += frame_len;
+            self.parse_stream.mark_read(frame_len);
             if self.state == ClientState::Dead {
                 return;
             }
@@ -165,23 +168,32 @@ impl ReplayClient {
         self.state = ClientState::Dead;
     }
 
-    pub fn send_frame(&mut self, tag: u8, data: Vec<u8>) {
+    pub fn send_frame(&mut self, tag: u8, data: &[u8]) {
         if self.state == ClientState::Dead {
             return;
         }
-        if self.waiting_for_sync || self.state == ClientState::Connecting {
-            self.pending_frames.push_back(PendingFrame { tag, data });
-        } else {
-            if tag == tags::F_SYNC {
-                self.waiting_for_sync = true;
-            }
-            self.queue(&data);
+        if self.state == ClientState::Connecting {
+            self.pre_connect_frames.push(PendingFrameData {
+                tag,
+                data: data.to_vec(),
+            });
+            return;
         }
+        self.outbox.write_no_commit(data);
+        self.pending_frames.push_back(PendingFrame {
+            tag,
+            len: data.len(),
+        });
+        self.send_pending();
     }
 
     fn send_pending(&mut self) {
+        if self.waiting_for_sync {
+            return;
+        }
         while let Some(frame) = self.pending_frames.pop_front() {
-            self.queue(&frame.data);
+            self.stats.log_send();
+            self.outbox.commit(frame.len);
             if frame.tag == tags::F_SYNC {
                 self.waiting_for_sync = true;
                 break;
@@ -189,26 +201,12 @@ impl ReplayClient {
         }
     }
 
-    fn queue(&mut self, bytes: &[u8]) {
-        self.stats.log_send();
-        self.outbox.extend_from_slice(bytes);
+    pub fn read_outbox(&self) -> &[u8] {
+        self.outbox.data()
     }
 
-    pub fn has_pending_write(&self) -> bool {
-        !self.outbox.is_empty()
-    }
-
-    pub fn take_outbox(&mut self) -> Vec<u8> {
-        std::mem::take(&mut self.outbox)
-    }
-
-    pub fn requeue_unwritten(&mut self, remaining: Vec<u8>) {
-        if remaining.is_empty() {
-            return;
-        }
-        let mut combined = remaining;
-        combined.extend_from_slice(&self.outbox);
-        self.outbox = combined;
+    pub fn clear_outbox(&mut self) {
+        self.outbox.mark_read_all();
     }
 
     fn queue_startup(&mut self) {
@@ -220,7 +218,7 @@ impl ReplayClient {
         params.push(("user".to_string(), self.config.user.clone()));
         params.push(("database".to_string(), self.config.dbname.clone()));
         let msg = proto::encode_startup(&params);
-        self.queue(&msg);
+        self.outbox.write(&msg);
     }
 
     fn handle_auth(&mut self, auth: Authentication) {
@@ -229,7 +227,7 @@ impl ReplayClient {
             Authentication::Cleartext => match &self.config.password {
                 Some(pass) => {
                     let msg = proto::encode_password(pass);
-                    self.queue(&msg);
+                    self.outbox.write(&msg);
                 }
                 None => {
                     error!("[{}] server wants password but its not specified", self.id);
@@ -240,7 +238,7 @@ impl ReplayClient {
                 Some(pass) => {
                     let hashed = proto::hash_md5_password(&self.config.user, pass, &salt);
                     let msg = proto::encode_password(&hashed);
-                    self.queue(&msg);
+                    self.outbox.write(&msg);
                 }
                 None => {
                     error!("[{}] server wants password but its not specified", self.id);
