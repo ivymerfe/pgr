@@ -72,13 +72,8 @@ enum Commands {
         #[arg(short = 'P', long, help = "Password")]
         pass: Option<String>,
 
-        #[arg(
-            short = 'T',
-            long,
-            default_value_t = 3.0,
-            help = "Timeout to disconnect from server after replay ends (seconds)"
-        )]
-        timeout: f64,
+        #[arg(long, default_value_t = 2048, help = "io_uring ring size")]
+        ring_size: u32,
     },
     #[command(about = "Dump a capture to CSV")]
     Dump {
@@ -193,21 +188,20 @@ fn run_command(cli: Cli) -> anyhow::Result<()> {
             dbname,
             user,
             pass,
-            timeout,
+            ring_size,
         } => {
             let map_file = files::try_create(&addr_map, "csv")?;
             let reader = read_capture(&input)?;
             info!("Replaying {input} -> {host}:{port} dbname={dbname} user={user}");
             info!("Map: {}", addr_map.display());
             let map = AddrMapWriter::new(map_file);
-            let timeout = Duration::from_secs_f64(timeout);
             let lat_map = match lat_map {
                 Some(lat_map_path) => {
                     Some(LatencyMap::new(files::try_create(&lat_map_path, "lat")?))
                 }
                 None => None,
             };
-            let config = ReplayConfig::new(host, port, dbname, user, pass, timeout);
+            let config = ReplayConfig::new(host, port, dbname, user, pass, ring_size);
             let mut mgr = ReplayManager::new();
             mgr.replay(config, reader, map, lat_map)?;
         }

@@ -8,6 +8,7 @@ pub const F_EXECUTE: u8 = b'E';
 pub const F_CLOSE: u8 = b'C';
 pub const F_SYNC: u8 = b'S';
 pub const F_QUERY: u8 = b'Q';
+pub const F_TERMINATE: u8 = b'X';
 
 pub const B_AUTH_REQUEST: u8 = b'R';
 pub const B_PARAMETER_STATUS: u8 = b'S';

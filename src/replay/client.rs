@@ -1,10 +1,9 @@
 use std::collections::VecDeque;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use std::time::Duration;
 
 use socket2::{Domain, Socket, Type};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::capture::reader::ClientId;
 use crate::proto::{self, Authentication, BackendMessage, tags};
@@ -18,7 +17,7 @@ pub struct ReplayConfig {
     pub password: Option<String>,
     pub dbname: String,
     pub application_name: String,
-    pub disconnect_timeout: Duration,
+    pub ring_size: u32,
 }
 
 #[derive(PartialEq)]
@@ -35,7 +34,7 @@ impl ReplayConfig {
         dbname: String,
         user: String,
         password: Option<String>,
-        disconnect_timeout: Duration,
+        ring_size: u32,
     ) -> Self {
         ReplayConfig {
             server: SocketAddr::new(host, port),
@@ -43,7 +42,7 @@ impl ReplayConfig {
             password,
             dbname,
             application_name: "pgr".to_string(),
-            disconnect_timeout,
+            ring_size,
         }
     }
 }
@@ -62,15 +61,16 @@ pub struct ReplayClient {
     pub id: ClientId,
     pub config: ReplayConfig,
     pub addr: SocketAddr,
-    pub state: ClientState,
     pub stats: Arc<ReplayStats>,
-
-    pre_connect_frames: Vec<PendingFrameData>,
-    pending_frames: VecDeque<PendingFrame>,
-    waiting_for_sync: bool,
 
     parse_stream: Stream,
     outbox: Stream,
+    pre_connect_frames: Vec<PendingFrameData>,
+    pending_frames: VecDeque<PendingFrame>,
+
+    pub state: ClientState,
+    waiting_for_sync: bool,
+    sent_terminate: bool,
 }
 
 pub struct NewConnection {
@@ -96,14 +96,15 @@ impl ReplayClient {
         let mut client = ReplayClient {
             id,
             config,
-            stats,
             addr,
-            state: ClientState::Connecting,
-            pre_connect_frames: Vec::new(),
-            pending_frames: VecDeque::new(),
-            waiting_for_sync: false,
+            stats,
             parse_stream: Stream::new(65536),
             outbox: Stream::new(65536),
+            pre_connect_frames: Vec::new(),
+            pending_frames: VecDeque::new(),
+            state: ClientState::Connecting,
+            waiting_for_sync: false,
+            sent_terminate: false,
         };
         client.queue_startup();
 
@@ -142,8 +143,8 @@ impl ReplayClient {
             self.stats.log_recv();
             if tag == tags::B_READY_FOR_QUERY {
                 self.waiting_for_sync = false;
-                self.send_pending();
             }
+            self.send_pending();
         }
     }
 
@@ -168,9 +169,19 @@ impl ReplayClient {
         self.state = ClientState::Dead;
     }
 
+    pub fn on_replay_end(&mut self) {
+        if !self.sent_terminate {
+            warn!("[{}] injecting terminate frame", self.id);
+            self.send_frame(tags::F_TERMINATE, &[tags::F_TERMINATE, 0, 0, 0, 0]);
+        }
+    }
+
     pub fn send_frame(&mut self, tag: u8, data: &[u8]) {
         if self.state == ClientState::Dead {
             return;
+        }
+        if tag == tags::F_TERMINATE {
+            self.sent_terminate = true;
         }
         if self.state == ClientState::Connecting {
             self.pre_connect_frames.push(PendingFrameData {
