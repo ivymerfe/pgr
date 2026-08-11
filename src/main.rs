@@ -5,7 +5,6 @@ use clap::{Parser, Subcommand};
 use std::io::BufWriter;
 use std::net::IpAddr;
 use std::path::PathBuf;
-use std::time::Duration;
 use std::{env, fs};
 
 use time::{UtcOffset, macros::format_description};
@@ -18,7 +17,6 @@ use crate::capture_desc::CaptureDesc;
 use crate::compare::addr_map::AddrMapReader;
 use crate::replay::addr_map::AddrMapWriter;
 use crate::replay::client::ReplayConfig;
-use crate::replay::latency::LatencyMap;
 use crate::replay::manager::ReplayManager;
 use crate::utils::files;
 
@@ -53,9 +51,6 @@ enum Commands {
             help = "File to store address mapping (needed for compare)"
         )]
         addr_map: PathBuf,
-
-        #[arg(short, long, value_parser = parse_absolute, help = "File to store latencies")]
-        lat_map: Option<PathBuf>,
 
         #[arg(short, long, default_value = "127.0.0.1", help = "Target server host")]
         host: IpAddr,
@@ -182,7 +177,6 @@ fn run_command(cli: Cli) -> anyhow::Result<()> {
         Commands::Replay {
             input,
             addr_map,
-            lat_map,
             host,
             port,
             dbname,
@@ -195,15 +189,9 @@ fn run_command(cli: Cli) -> anyhow::Result<()> {
             info!("Replaying {input} -> {host}:{port} dbname={dbname} user={user}");
             info!("Map: {}", addr_map.display());
             let map = AddrMapWriter::new(map_file);
-            let lat_map = match lat_map {
-                Some(lat_map_path) => {
-                    Some(LatencyMap::new(files::try_create(&lat_map_path, "lat")?))
-                }
-                None => None,
-            };
             let config = ReplayConfig::new(host, port, dbname, user, pass, ring_size);
             let mut mgr = ReplayManager::new();
-            mgr.replay(config, reader, map, lat_map)?;
+            mgr.replay(config, reader, map)?;
         }
         Commands::Dump { input, output } => {
             let reader = read_capture(&input)?;

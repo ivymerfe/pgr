@@ -38,6 +38,9 @@ pub enum ConnCommand {
         data: Vec<u8>,
         flush: bool,
     },
+    Terminate {
+        ts: u64,
+    },
 }
 
 impl ConnCommand {
@@ -45,6 +48,7 @@ impl ConnCommand {
         match self {
             ConnCommand::Connect { ts, .. } => *ts,
             ConnCommand::Send { ts, .. } => *ts,
+            ConnCommand::Terminate { ts } => *ts,
         }
     }
 }
@@ -139,19 +143,11 @@ impl ReplayLoop {
             self.retry_pending_io(&mut connections);
 
             self.drain_commands();
-            let dispatch_count = self.dispatch_ready(&mut connections);
+            self.dispatch_ready(&mut connections);
             self.retry_pending_io(&mut connections);
 
-            if self.rx_closed && self.pending_commands.is_empty() {
-                if dispatch_count > 0 {
-                    for conn in connections.values_mut() {
-                        conn.client.on_replay_end();
-                        self.submit_write(conn);
-                    }
-                }
-                if connections.is_empty() {
-                    break;
-                }
+            if self.rx_closed && self.pending_commands.is_empty() && connections.is_empty() {
+                break;
             }
         }
     }
@@ -244,7 +240,7 @@ impl ReplayLoop {
         }
     }
 
-    fn dispatch_ready(&mut self, conns: &mut HashMap<ClientId, Connection>) -> u32 {
+    fn dispatch_ready(&mut self, conns: &mut HashMap<ClientId, Connection>) {
         let now = self.now_us();
         let mut count: u32 = 0;
         while let Some(front) = self.pending_commands.front() {
@@ -259,7 +255,6 @@ impl ReplayLoop {
                 self.flush_submissions();
             }
         }
-        return count;
     }
 
     fn dispatch_command(
@@ -279,10 +274,16 @@ impl ReplayLoop {
                 ..
             } => {
                 if let Some(conn) = conns.get_mut(&id) {
-                    conn.client.send_frame(tag, &data);
+                    conn.client.replay_frame(tag, &data);
                     if flush {
                         self.submit_write(conn);
                     }
+                }
+            }
+            ConnCommand::Terminate { .. } => {
+                for conn in conns.values_mut() {
+                    conn.client.on_replay_end();
+                    self.submit_write(conn);
                 }
             }
         }

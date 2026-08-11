@@ -12,7 +12,6 @@ use crate::{
     replay::{
         addr_map::AddrMapWriter,
         client::ReplayConfig,
-        latency::LatencyMap,
         r#loop::{ConnCommand, ReplayLoop},
         stats::ReplayStats,
     },
@@ -42,7 +41,6 @@ impl ReplayManager {
         config: ReplayConfig,
         mut reader: Box<dyn CaptureReader>,
         addr_map: AddrMapWriter,
-        lat_map: Option<LatencyMap>,
     ) -> anyhow::Result<()> {
         let stats = Arc::new(ReplayStats::new());
 
@@ -77,7 +75,6 @@ impl ReplayManager {
                     if !Self::forward_frames(client, data.ts, data.buf, &cmd_tx, &waker) {
                         break;
                     }
-
                     let elapsed_us = start.elapsed().as_micros() as u64;
                     if data.ts.saturating_sub(elapsed_us) > 1_000_000 {
                         sleep(Duration::from_micros(500_000));
@@ -91,6 +88,7 @@ impl ReplayManager {
                 }
             }
         }
+        Self::send_cmd(&cmd_tx, &waker, ConnCommand::Terminate { ts: 0 });
         drop(cmd_tx);
 
         info!("Finished reading");

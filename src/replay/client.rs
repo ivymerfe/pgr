@@ -1,7 +1,7 @@
-use std::collections::VecDeque;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
+use quanta::Instant;
 use socket2::{Domain, Socket, Type};
 use tracing::{error, info, warn};
 
@@ -47,11 +47,6 @@ impl ReplayConfig {
     }
 }
 
-struct PendingFrame {
-    tag: u8,
-    len: usize,
-}
-
 struct PendingFrameData {
     tag: u8,
     data: Vec<u8>,
@@ -66,11 +61,13 @@ pub struct ReplayClient {
     parse_stream: Stream,
     outbox: Stream,
     pre_connect_frames: Vec<PendingFrameData>,
-    pending_frames: VecDeque<PendingFrame>,
 
     pub state: ClientState,
-    waiting_for_sync: bool,
     sent_terminate: bool,
+
+    start: Instant,
+    req_index: u32,
+    resp_index: u32,
 }
 
 pub struct NewConnection {
@@ -101,24 +98,40 @@ impl ReplayClient {
             parse_stream: Stream::new(65536),
             outbox: Stream::new(65536),
             pre_connect_frames: Vec::new(),
-            pending_frames: VecDeque::new(),
             state: ClientState::Connecting,
-            waiting_for_sync: false,
             sent_terminate: false,
+            start: Instant::now(),
+            req_index: 0,
+            resp_index: 0,
         };
         client.queue_startup();
 
         Ok(NewConnection { client, socket })
     }
 
-    pub fn on_connected(&mut self, local_addr: SocketAddr) {
-        self.addr = local_addr;
+    pub fn delta_us(&self) -> u64 {
+        self.start.elapsed().as_micros() as u64
+    }
+
+    fn send_frame(&mut self, data: &[u8]) {
+        self.outbox.write(data);
+        self.stats.log_send();
+        self.req_index += 1
+    }
+
+    pub fn read_outbox(&self) -> &[u8] {
+        self.outbox.data()
+    }
+
+    pub fn clear_outbox(&mut self) {
+        self.outbox.mark_read_all();
     }
 
     fn handle_frame(&mut self, tag: u8, offset: usize, len: usize) {
         let data = &self.parse_stream.data()[offset..len];
-        if self.state == ClientState::Connecting {
-            match proto::parse_message(tag, data) {
+        match self.state {
+            ClientState::Dead => return,
+            ClientState::Connecting => match proto::parse_message(tag, data) {
                 Ok(msg) => match msg {
                     BackendMessage::Authentication(auth) => self.handle_auth(auth),
                     BackendMessage::ErrorResponse(e) => {
@@ -127,9 +140,10 @@ impl ReplayClient {
                     BackendMessage::ReadyForQuery => {
                         info!("[{}] connected: {}", self.id, self.addr);
                         self.state = ClientState::Normal;
+                        self.start = Instant::now();
                         let frames = std::mem::take(&mut self.pre_connect_frames);
                         for frame in frames {
-                            self.send_frame(frame.tag, &frame.data);
+                            self.replay_frame(frame.tag, &frame.data);
                         }
                     }
                     _ => {}
@@ -137,15 +151,33 @@ impl ReplayClient {
                 Err(()) => {
                     error!("[{}] malformed server message", self.id);
                 }
+            },
+            ClientState::Normal => {
+                self.stats.log_recv();
             }
         }
-        if self.state == ClientState::Normal {
-            self.stats.log_recv();
-            if tag == tags::B_READY_FOR_QUERY {
-                self.waiting_for_sync = false;
-            }
-            self.send_pending();
+        self.resp_index += 1;
+    }
+
+    pub fn on_connected(&mut self, local_addr: SocketAddr) {
+        self.addr = local_addr;
+    }
+
+    pub fn replay_frame(&mut self, tag: u8, data: &[u8]) {
+        if self.state == ClientState::Dead {
+            return;
         }
+        if tag == tags::F_TERMINATE {
+            self.sent_terminate = true;
+        }
+        if self.state == ClientState::Connecting {
+            self.pre_connect_frames.push(PendingFrameData {
+                tag,
+                data: data.to_vec(),
+            });
+            return;
+        }
+        self.send_frame(data);
     }
 
     pub fn on_read(&mut self, data: &[u8]) {
@@ -160,7 +192,11 @@ impl ReplayClient {
     }
 
     pub fn on_eof(&mut self) {
-        info!("[{}] disconnected", self.id);
+        info!(
+            "[{}] disconnected, work time = {:.3}",
+            self.id,
+            self.delta_us() as f32 / 1e3
+        );
         self.state = ClientState::Dead;
     }
 
@@ -172,64 +208,18 @@ impl ReplayClient {
     pub fn on_replay_end(&mut self) {
         if !self.sent_terminate {
             warn!("[{}] injecting terminate frame", self.id);
-            self.send_frame(tags::F_TERMINATE, &[tags::F_TERMINATE, 0, 0, 0, 0]);
+            self.replay_frame(tags::F_TERMINATE, &proto::TERMINATE_MSG);
         }
-    }
-
-    pub fn send_frame(&mut self, tag: u8, data: &[u8]) {
-        if self.state == ClientState::Dead {
-            return;
-        }
-        if tag == tags::F_TERMINATE {
-            self.sent_terminate = true;
-        }
-        if self.state == ClientState::Connecting {
-            self.pre_connect_frames.push(PendingFrameData {
-                tag,
-                data: data.to_vec(),
-            });
-            return;
-        }
-        self.outbox.write_no_commit(data);
-        self.pending_frames.push_back(PendingFrame {
-            tag,
-            len: data.len(),
-        });
-        self.send_pending();
-    }
-
-    fn send_pending(&mut self) {
-        if self.waiting_for_sync {
-            return;
-        }
-        while let Some(frame) = self.pending_frames.pop_front() {
-            self.stats.log_send();
-            self.outbox.commit(frame.len);
-            if frame.tag == tags::F_SYNC {
-                self.waiting_for_sync = true;
-                break;
-            }
-        }
-    }
-
-    pub fn read_outbox(&self) -> &[u8] {
-        self.outbox.data()
-    }
-
-    pub fn clear_outbox(&mut self) {
-        self.outbox.mark_read_all();
     }
 
     fn queue_startup(&mut self) {
         let mut params = Vec::new();
-        params.push((
-            "application_name".to_string(),
-            self.config.application_name.clone(),
-        ));
-        params.push(("user".to_string(), self.config.user.clone()));
-        params.push(("database".to_string(), self.config.dbname.clone()));
+        params.push(("application_name", self.config.application_name.clone()));
+        params.push(("user", self.config.user.clone()));
+        params.push(("database", self.config.dbname.clone()));
+        params.push(("pgr.client_id", self.id.to_string()));
         let msg = proto::encode_startup(&params);
-        self.outbox.write(&msg);
+        self.send_frame(&msg);
     }
 
     fn handle_auth(&mut self, auth: Authentication) {
@@ -238,7 +228,7 @@ impl ReplayClient {
             Authentication::Cleartext => match &self.config.password {
                 Some(pass) => {
                     let msg = proto::encode_password(pass);
-                    self.outbox.write(&msg);
+                    self.send_frame(&msg);
                 }
                 None => {
                     error!("[{}] server wants password but its not specified", self.id);
@@ -249,7 +239,7 @@ impl ReplayClient {
                 Some(pass) => {
                     let hashed = proto::hash_md5_password(&self.config.user, pass, &salt);
                     let msg = proto::encode_password(&hashed);
-                    self.outbox.write(&msg);
+                    self.send_frame(&msg);
                 }
                 None => {
                     error!("[{}] server wants password but its not specified", self.id);

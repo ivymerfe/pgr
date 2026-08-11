@@ -66,6 +66,10 @@ impl FrameBuffer {
         self.compact_buffer();
     }
 
+    pub fn frame_offset(&self) -> usize {
+        self.frame_offset
+    }
+
     pub fn read_frame(&self, info: &FrameInfo) -> &[u8] {
         assert!(
             info.stream_start >= self.buf_offset,

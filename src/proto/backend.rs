@@ -80,7 +80,9 @@ pub fn parse_message(tag: u8, mut data: &[u8]) -> Result<BackendMessage<'_>, ()>
     })
 }
 
-pub fn encode_startup(params: &[(String, String)]) -> Vec<u8> {
+pub const TERMINATE_MSG: [u8; 5] = [tags::F_TERMINATE, 0, 0, 0, 4];
+
+pub fn encode_startup(params: &[(&str, String)]) -> Vec<u8> {
     let mut body = Vec::new();
     body.extend_from_slice(&tags::F_PROTO_VERSION.to_be_bytes());
     for (k, v) in params {

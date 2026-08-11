@@ -15,6 +15,7 @@ pub fn dump(mut reader: Box<dyn CaptureReader>, output: File) -> anyhow::Result<
     loop {
         match reader.next(false) {
             Ok(mut data) => loop {
+                let offset = data.buf.frame_offset();
                 let buf = &mut data.buf;
                 match buf.find_frame() {
                     FrameResult::Complete(info) => {
@@ -31,7 +32,7 @@ pub fn dump(mut reader: Box<dyn CaptureReader>, output: File) -> anyhow::Result<
                     }
                     FrameResult::Incomplete => break,
                     FrameResult::Desync => {
-                        warn!("[{}] desync", data.id);
+                        warn!("[{}] desync at {}", data.id, offset);
                         buf.resync();
                     }
                 }
