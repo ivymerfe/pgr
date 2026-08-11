@@ -29,7 +29,6 @@ bytesize = "2.7.0"
 aya-log = "0.3.0"
 humantime = "2.4.0"
 quanta = "0.12.6"
-mio = { version = "1.2.2", features = ["net", "os-poll"] }
 ctrlc = "3.5.2"
 io-uring = "0.7.13"
 socket2 = "0.6.5"
