@@ -10,7 +10,6 @@ use socket2::Socket;
 use tracing::error;
 
 use crate::capture::reader::ClientId;
-use crate::replay::addr_map::AddrMapWriter;
 use crate::replay::client::{ClientState, NewConnection, ReplayClient, ReplayConfig};
 use crate::replay::stats::ReplayStats;
 use crate::utils::stream::Stream;
@@ -71,7 +70,6 @@ pub struct ReplayLoop {
 
     rx: Receiver<ConnCommand>,
     stats: Arc<ReplayStats>,
-    addr_map: AddrMapWriter,
 
     ring: IoUring,
     waker: Arc<Waker>,
@@ -89,7 +87,6 @@ impl ReplayLoop {
         config: ReplayConfig,
         rx: Receiver<ConnCommand>,
         stats: Arc<ReplayStats>,
-        addr_map: AddrMapWriter,
     ) -> io::Result<Self> {
         let ring = IoUring::new(config.ring_size)?;
         let waker = Arc::new(Waker::new()?);
@@ -101,7 +98,6 @@ impl ReplayLoop {
             server_addr,
             rx,
             stats,
-            addr_map,
             ring,
             waker,
             wake_buf: [0u8; 8],
@@ -437,9 +433,6 @@ impl ReplayLoop {
             .unwrap_or(self.config.server);
         conn.client.on_connected(local_addr);
 
-        if let Err(e) = self.addr_map.write(id, local_addr) {
-            error!("[{id}] failed to write addr: {e}");
-        }
         self.submit_read(conn);
         self.submit_write(conn);
         return true;

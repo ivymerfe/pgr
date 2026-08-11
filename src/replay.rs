@@ -1,4 +1,3 @@
-pub mod addr_map;
 pub mod client;
 pub mod r#loop;
 pub mod manager;

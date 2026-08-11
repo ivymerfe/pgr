@@ -10,7 +10,6 @@ use crate::{
         reader::{CaptureReader, ClientId, ReadError},
     },
     replay::{
-        addr_map::AddrMapWriter,
         client::ReplayConfig,
         r#loop::{ConnCommand, ReplayLoop},
         stats::ReplayStats,
@@ -40,7 +39,6 @@ impl ReplayManager {
         &mut self,
         config: ReplayConfig,
         mut reader: Box<dyn CaptureReader>,
-        addr_map: AddrMapWriter,
     ) -> anyhow::Result<()> {
         let stats = Arc::new(ReplayStats::new());
 
@@ -58,13 +56,13 @@ impl ReplayManager {
 
         let (cmd_tx, cmd_rx) = unbounded::<ConnCommand>();
 
-        let mut conn = ReplayLoop::new(config, cmd_rx, stats, addr_map)?;
+        let mut conn = ReplayLoop::new(config, cmd_rx, stats)?;
         let waker = conn.waker();
         let conn_handle = std::thread::spawn(move || conn.run());
 
         let start = Instant::now();
         loop {
-            match reader.next(false) {
+            match reader.next() {
                 Ok(data) => {
                     let client = self.clients.entry(data.id).or_insert_with(|| ClientInfo {
                         id: data.id,

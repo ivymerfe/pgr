@@ -68,7 +68,7 @@ impl<'a> CaptureReader for PcapReader<'a> {
         self.clients.get_mut(&id).map(|h| &mut h.fb)
     }
 
-    fn next(&mut self, _want_addr: bool) -> ReadResult<'_> {
+    fn next(&mut self) -> ReadResult<'_> {
         if self.consume > 0 {
             self.pcap.consume_noshift(self.consume);
             self.consume = 0;
@@ -103,7 +103,7 @@ impl<'a> CaptureReader for PcapReader<'a> {
                     let tcp = packet.tcp;
                     let fb = &mut client.fb;
                     if tcp.syn() {
-                        fb.mark_connection_start();
+                        fb.mark_connection_start(ts_relative);
                     }
                     if client.re.feed(
                         tcp.sequence_number(),
@@ -114,7 +114,6 @@ impl<'a> CaptureReader for PcapReader<'a> {
                         return Ok(ReadData {
                             id: *id,
                             ts: ts_relative,
-                            addr: Some(addr),
                             buf: fb,
                         });
                     }

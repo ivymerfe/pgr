@@ -13,7 +13,7 @@ pub fn dump(mut reader: Box<dyn CaptureReader>, output: File) -> anyhow::Result<
     let mut writer = BufWriter::with_capacity(131072, output);
 
     loop {
-        match reader.next(false) {
+        match reader.next() {
             Ok(mut data) => loop {
                 let offset = data.buf.frame_offset();
                 let buf = &mut data.buf;

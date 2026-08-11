@@ -1,4 +1,4 @@
-use std::{io, net::SocketAddr};
+use std::io;
 
 use crate::capture::frame_buffer::FrameBuffer;
 
@@ -7,7 +7,6 @@ pub type ClientId = u32;
 pub struct ReadData<'a> {
     pub id: ClientId,
     pub ts: u64,
-    pub addr: Option<SocketAddr>,
     pub buf: &'a mut FrameBuffer,
 }
 
@@ -21,7 +20,7 @@ pub type ReadResult<'a> = Result<ReadData<'a>, ReadError>;
 
 pub trait CaptureReader {
     fn get_buffer(&mut self, id: ClientId) -> Option<&mut FrameBuffer>;
-    fn next(&mut self, want_addr: bool) -> ReadResult<'_>;
+    fn next(&mut self) -> ReadResult<'_>;
 }
 
 impl From<io::Error> for ReadError {

@@ -21,6 +21,7 @@ impl Default for ConnState {
 pub struct FrameBuffer {
     pub data: Vec<u8>,
     pub state: ConnState,
+    pub connect_ts: u64,
     buf_offset: usize,
     read_offset: usize,
     frame_offset: usize,
@@ -42,10 +43,11 @@ pub enum FrameResult {
 }
 
 impl FrameBuffer {
-    pub fn mark_connection_start(&mut self) {
+    pub fn mark_connection_start(&mut self, ts: u64) {
         if self.state == ConnState::Unknown {
             self.state = ConnState::AwaitingStartup;
             self.frame_offset = self.buf_offset + self.data.len();
+            self.connect_ts = ts;
         }
     }
 

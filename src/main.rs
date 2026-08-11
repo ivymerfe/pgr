@@ -14,8 +14,6 @@ use tracing_subscriber::fmt::time::OffsetTime;
 use crate::capture::acap::AcapWriter;
 use crate::capture::read_capture;
 use crate::capture_desc::CaptureDesc;
-use crate::compare::addr_map::AddrMapReader;
-use crate::replay::addr_map::AddrMapWriter;
 use crate::replay::client::ReplayConfig;
 use crate::replay::manager::ReplayManager;
 use crate::utils::files;
@@ -43,14 +41,6 @@ enum Commands {
     Replay {
         #[arg(help = "Capture: path[:port]@[offset][+duration]")]
         input: CaptureDesc,
-
-        #[arg(short,
-            long,
-            default_value = "replay.csv",
-            value_parser = parse_absolute,
-            help = "File to store address mapping (needed for compare)"
-        )]
-        addr_map: PathBuf,
 
         #[arg(short, long, default_value = "127.0.0.1", help = "Target server host")]
         host: IpAddr,
@@ -85,15 +75,6 @@ enum Commands {
 
         #[arg(short, long, help = "Replay capture: path[:port]@[offset][+duration]")]
         replay: CaptureDesc,
-
-        #[arg(
-            short,
-            long,
-            default_value = "replay.csv",
-            value_parser = parse_absolute,
-            help = "Address mapping file produced by replay"
-        )]
-        addr_map: PathBuf,
 
         #[arg(long, help = "File to save differences to")]
         delta: Option<PathBuf>,
@@ -176,7 +157,6 @@ fn run_command(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Commands::Replay {
             input,
-            addr_map,
             host,
             port,
             dbname,
@@ -184,14 +164,11 @@ fn run_command(cli: Cli) -> anyhow::Result<()> {
             pass,
             ring_size,
         } => {
-            let map_file = files::try_create(&addr_map, "csv")?;
             let reader = read_capture(&input)?;
             info!("Replaying {input} -> {host}:{port} dbname={dbname} user={user}");
-            info!("Map: {}", addr_map.display());
-            let map = AddrMapWriter::new(map_file);
             let config = ReplayConfig::new(host, port, dbname, user, pass, ring_size);
             let mut mgr = ReplayManager::new();
-            mgr.replay(config, reader, map)?;
+            mgr.replay(config, reader)?;
         }
         Commands::Dump { input, output } => {
             let reader = read_capture(&input)?;
@@ -199,25 +176,17 @@ fn run_command(cli: Cli) -> anyhow::Result<()> {
             info!("Dumping {input} -> {}", output.display());
             dump::dump(reader, output_file)?;
         }
-        Commands::Compare {
-            src,
-            replay,
-            addr_map,
-            delta,
-        } => {
+        Commands::Compare { src, replay, delta } => {
             let src_reader = read_capture(&src)?;
             let replay_reader = read_capture(&replay)?;
-            let map_file = files::try_open(&addr_map)?;
             info!("Comparing {} <-> {}", src, replay);
-            info!("Map: {}", addr_map.display());
-            let mut map = AddrMapReader::new(map_file)?;
             let mut delta_writer = None;
             if let Some(delta) = delta {
                 let file = files::try_create(&delta, "csv")?;
                 delta_writer = Some(BufWriter::new(file));
                 info!("Deltas: {}", delta.display());
             }
-            compare::compare(&mut map, src_reader, replay_reader, delta_writer)?;
+            compare::compare(src_reader, replay_reader, delta_writer)?;
         }
         Commands::Capture {
             output,
