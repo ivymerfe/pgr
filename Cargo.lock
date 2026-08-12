@@ -724,7 +724,6 @@ dependencies = [
  "aya",
  "aya-build 0.2.0 (git+https://github.com/aya-rs/aya)",
  "aya-log",
- "bytes",
  "bytesize",
  "capture-common",
  "cargo_metadata",

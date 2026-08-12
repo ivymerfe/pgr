@@ -13,7 +13,6 @@ members = [
 [dependencies]
 aya = "0.14.0"
 capture-common = { path = "capture-common", features = ["user"] }
-bytes = "1.12.1"
 clap = { version = "4.6.4", features = ["derive"] }
 etherparse = "0.21.0"
 md5 = "0.8.1"
