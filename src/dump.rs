@@ -7,7 +7,7 @@ use tracing::{error, info};
 use crate::capture::frame_buffer::FrameResult;
 use crate::capture::reader::CaptureReader;
 use crate::capture::reader::ReadError;
-use crate::parser::c2s_display::TagFrame;
+use crate::proto::format::DisplayFrame;
 
 pub fn dump(mut reader: Box<dyn CaptureReader>, output: File) -> anyhow::Result<()> {
     let mut writer = BufWriter::with_capacity(131072, output);
@@ -25,7 +25,7 @@ pub fn dump(mut reader: Box<dyn CaptureReader>, output: File) -> anyhow::Result<
                             "{:.6},{},{}",
                             data.ts as f64 / 1e6,
                             data.id,
-                            TagFrame(info.tag, frame)
+                            DisplayFrame(info.tag, frame)
                         )?;
                         buf.consume_frame(&info);
                         buf.mark_read(info.stream_end);

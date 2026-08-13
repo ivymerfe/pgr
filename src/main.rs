@@ -22,7 +22,6 @@ mod capture;
 mod capture_desc;
 mod compare;
 mod dump;
-mod parser;
 mod proto;
 mod replay;
 mod utils;

@@ -1,20 +1,21 @@
-use crate::{
-    parser::c2s::{Codes, PgC2S, Values, parse_pg_message},
-    utils::format,
-};
 use std::fmt::{self, Write};
 
-pub struct TagFrame<'a>(pub u8, pub &'a [u8]);
+use crate::proto::{
+    c2s::PgC2S,
+    parse::{Codes, Values},
+};
 
-impl<'a> fmt::Display for TagFrame<'a> {
+pub struct DisplayFrame<'a>(pub u8, pub &'a [u8]);
+
+impl<'a> fmt::Display for DisplayFrame<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match parse_pg_message(self.0, self.1) {
+        match PgC2S::parse(self.0, self.1) {
             Ok(msg) => {
                 write!(f, "{}", msg)?;
             }
             Err(e) => {
                 write!(f, "{},(\"{}\"),\"", self.0, e)?;
-                format::write_escaped_bytes(f, self.1)?;
+                write_escaped_bytes(f, self.1)?;
                 f.write_char('"')?;
             }
         }
@@ -106,7 +107,7 @@ impl<'a> fmt::Display for PgC2S<'a> {
             PgC2S::CopyFail(msg) => write!(f, "CopyFail,\"{}\"", msg),
             PgC2S::Unknown { tag, payload } => {
                 write!(f, "Unknown,{},", *tag as char)?;
-                format::write_escaped_bytes(f, *payload)
+                write_escaped_bytes(f, *payload)
             }
         }
     }
@@ -132,11 +133,20 @@ pub fn write_values<'a, W: Write>(w: &mut W, vals: &Values<'_>) -> fmt::Result {
         match v {
             Some(b) => {
                 w.write_char('"')?;
-                format::write_escaped_bytes(w, b)?;
+                write_escaped_bytes(w, b)?;
                 w.write_char('"')?;
             }
             None => write!(w, "None")?,
         }
     }
     w.write_char(']')
+}
+
+pub fn write_escaped_bytes<W: Write>(w: &mut W, bytes: &[u8]) -> fmt::Result {
+    for &b in bytes {
+        for c in std::ascii::escape_default(b) {
+            w.write_char(c as char)?;
+        }
+    }
+    Ok(())
 }
