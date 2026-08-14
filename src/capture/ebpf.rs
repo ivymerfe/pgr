@@ -43,8 +43,8 @@ pub fn run_capture(writer: AcapWriter, interface: &str, port: u16) -> anyhow::Re
 
 fn start_capture(iface: &str, dst_port: u16) -> anyhow::Result<CaptureHandle> {
     let mut ebpf = Ebpf::load(aya::include_bytes_aligned!(concat!(
-        env!("OUT_DIR"),
-        "/capture-ebpf"
+        env!("CARGO_MANIFEST_DIR"),
+        "/target/bpfel-unknown-none/release/capture-ebpf"
     )))?;
     let mut config: Array<_, Config> = Array::try_from(ebpf.map_mut("CONFIG").unwrap())?;
     config.set(0, Config { dst_port }, 0)?;

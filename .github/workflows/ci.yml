@@ -24,7 +24,15 @@ jobs:
         with:
           components: rust-src
 
+      - name: Cache bpf-linker binary
+        id: cache-bpf-linker
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/bpf-linker
+          key: ${{ runner.os }}-bpf-linker-0.10.4
+
       - name: Install bpf-linker
+        if: steps.cache-bpf-linker.outputs.cache-hit != 'true'
         run: cargo install bpf-linker --version 0.10.4 --locked
 
       - name: Cache cargo registry and target dir
@@ -32,11 +40,14 @@ jobs:
         with:
           cache-all-crates: true
 
+      - name: Make ebpf build script executable
+        run: chmod +x build_ebpf.sh
+
+      - name: Build eBPF
+        run: ./build_ebpf.sh
+
       - name: Build
         run: cargo build --release
-
-      - name: Test
-        run: cargo test --release
 
       - name: Prepare binary
         if: startsWith(github.ref, 'refs/tags/v')

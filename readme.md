@@ -106,5 +106,6 @@ cargo install bpf-linker
 ```
 
 ```bash
+./build_ebpf.sh
 cargo build --release
 ```

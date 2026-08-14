@@ -31,8 +31,3 @@ quanta = "0.12.6"
 ctrlc = "3.5.2"
 io-uring = "0.7.13"
 socket2 = "0.6.5"
-
-[build-dependencies]
-cargo_metadata = "0.23.1"
-aya-build = { git = "https://github.com/aya-rs/aya" }
-anyhow = "1.0.104"
