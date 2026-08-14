@@ -3,16 +3,9 @@ use pcap_parser::{traits::PcapReaderIterator, *};
 use std::{collections::HashMap, io::Read, net::SocketAddr};
 
 use crate::capture::{
-    frame_buffer::FrameBuffer,
-    reader::{CaptureReader, ClientId, ReadData, ReadError, ReadResult},
+    reader::{CaptureData, CaptureReader, ClientId, ReadError, ReadResult},
     reassembler::Reassembler,
 };
-
-#[derive(Default)]
-struct PcapClient {
-    re: Reassembler,
-    fb: FrameBuffer,
-}
 
 pub struct TsPacket<'a> {
     pub addr: SocketAddr,
@@ -25,11 +18,9 @@ pub struct PcapReader<'a> {
     port: u16,
     ts_offset: u64,
     max_duration: u64,
-    consume: usize,
-    refill: bool,
-    clients: HashMap<ClientId, PcapClient>,
-    id_to_addr: HashMap<ClientId, SocketAddr>,
-    addr_to_id: HashMap<SocketAddr, ClientId>,
+    buffer: Vec<u8>,
+    reassemblers: HashMap<ClientId, Reassembler>,
+    addr_map: HashMap<SocketAddr, ClientId>,
     next_id: u32,
     pub first_ts: u64,
 }
@@ -46,11 +37,9 @@ impl<'a> PcapReader<'a> {
             port,
             ts_offset,
             max_duration,
-            consume: 0,
-            refill: false,
-            clients: HashMap::new(),
-            id_to_addr: HashMap::new(),
-            addr_to_id: HashMap::new(),
+            buffer: Vec::new(),
+            reassemblers: HashMap::new(),
+            addr_map: HashMap::new(),
             next_id: 0,
             first_ts: 0,
         })
@@ -64,68 +53,56 @@ impl From<PcapError<&[u8]>> for ReadError {
 }
 
 impl<'a> CaptureReader for PcapReader<'a> {
-    fn get_buffer(&mut self, id: ClientId) -> Option<&mut FrameBuffer> {
-        self.clients.get_mut(&id).map(|h| &mut h.fb)
-    }
-
     fn next(&mut self) -> ReadResult<'_> {
-        if self.consume > 0 {
-            self.pcap.consume_noshift(self.consume);
-            self.consume = 0;
-        }
-        if self.refill {
-            self.pcap.refill()?;
-            self.refill = false;
-        }
-        match self.pcap.next() {
-            Ok((consumed, block)) => {
-                self.consume += consumed;
-                if let Some(packet) = process_block(block, self.port) {
-                    if self.first_ts == 0 {
-                        self.first_ts = packet.ts;
-                    }
-                    let ts_abs = packet.ts.saturating_sub(self.first_ts);
-                    if ts_abs < self.ts_offset {
-                        return Err(ReadError::Continue);
-                    }
-                    let ts_relative = ts_abs - self.ts_offset;
-                    if ts_relative > self.max_duration {
-                        return Err(ReadError::Eof);
-                    }
-                    let addr = packet.addr;
-                    let id = self.addr_to_id.entry(addr).or_insert_with(|| {
-                        let id = self.next_id;
-                        self.next_id += 1;
-                        self.id_to_addr.insert(id, addr);
-                        id
-                    });
-                    let client = self.clients.entry(*id).or_default();
-                    let tcp = packet.tcp;
-                    let fb = &mut client.fb;
-                    if tcp.syn() {
-                        fb.mark_connection_start(ts_relative);
-                    }
-                    if client.re.feed(
-                        tcp.sequence_number(),
-                        tcp.syn(),
-                        tcp.payload(),
-                        &mut fb.data,
-                    ) {
-                        return Ok(ReadData {
-                            id: *id,
+        loop {
+            match self.pcap.next() {
+                Ok((consumed, block)) => {
+                    if let Some(packet) = process_block(block, self.port) {
+                        if self.first_ts == 0 {
+                            self.first_ts = packet.ts;
+                        }
+                        let ts_abs = packet.ts.saturating_sub(self.first_ts);
+                        if ts_abs < self.ts_offset {
+                            self.pcap.consume_noshift(consumed);
+                            continue;
+                        }
+                        let ts_relative = ts_abs - self.ts_offset;
+                        if ts_relative > self.max_duration {
+                            return Err(ReadError::Eof);
+                        }
+                        let addr = packet.addr;
+                        let id = *self.addr_map.entry(addr).or_insert_with(|| {
+                            let id = self.next_id;
+                            self.next_id += 1;
+                            id
+                        });
+                        let tcp = packet.tcp;
+                        let re = self.reassemblers.entry(id).or_default();
+                        self.buffer.clear();
+                        re.feed(
+                            tcp.sequence_number(),
+                            tcp.syn(),
+                            tcp.payload(),
+                            &mut self.buffer,
+                        );
+                        let is_connect = tcp.syn();
+                        self.pcap.consume_noshift(consumed);
+                        return Ok(CaptureData {
+                            id,
                             ts: ts_relative,
-                            buf: fb,
+                            connect: is_connect,
+                            buf: &self.buffer,
                         });
                     }
+                    self.pcap.consume_noshift(consumed);
                 }
+                Err(PcapError::Eof) => return Err(ReadError::Eof),
+                Err(PcapError::Incomplete(_sz)) => {
+                    self.pcap.refill()?;
+                }
+                Err(e) => return Err(e.into()),
             }
-            Err(PcapError::Eof) => return Err(ReadError::Eof),
-            Err(PcapError::Incomplete(_sz)) => {
-                self.refill = true;
-            }
-            Err(e) => return Err(e.into()),
         }
-        return Err(ReadError::Continue);
     }
 }
 

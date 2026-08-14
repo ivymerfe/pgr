@@ -1,25 +1,22 @@
 use std::io;
 
-use crate::capture::frame_buffer::FrameBuffer;
-
 pub type ClientId = u32;
 
-pub struct ReadData<'a> {
+pub struct CaptureData<'a> {
     pub id: ClientId,
     pub ts: u64,
-    pub buf: &'a mut FrameBuffer,
+    pub connect: bool,
+    pub buf: &'a [u8],
 }
 
 pub enum ReadError {
-    Continue,
     Eof,
     Error(String),
 }
 
-pub type ReadResult<'a> = Result<ReadData<'a>, ReadError>;
+pub type ReadResult<'a> = Result<CaptureData<'a>, ReadError>;
 
 pub trait CaptureReader {
-    fn get_buffer(&mut self, id: ClientId) -> Option<&mut FrameBuffer>;
     fn next(&mut self) -> ReadResult<'_>;
 }
 

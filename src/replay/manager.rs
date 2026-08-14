@@ -2,11 +2,11 @@ use std::{collections::HashMap, sync::Arc, thread::sleep, time::Duration};
 
 use crossbeam_channel::{Sender, unbounded};
 use quanta::Instant;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 use crate::{
     capture::{
-        frame_buffer::{ConnState, FrameResult},
+        frame_buffer::{ConnState, FrameBuffer},
         reader::{CaptureReader, ClientId, ReadError},
     },
     replay::{
@@ -19,9 +19,18 @@ use crate::{
 
 struct ClientInfo {
     id: ClientId,
-    first_ts: u64,
-    found_startup: bool,
     connected: bool,
+    buf: FrameBuffer,
+}
+
+impl ClientInfo {
+    pub fn new(id: ClientId) -> Self {
+        Self {
+            id,
+            connected: false,
+            buf: FrameBuffer::new(id),
+        }
+    }
 }
 
 pub struct ReplayManager {
@@ -64,13 +73,13 @@ impl ReplayManager {
         loop {
             match reader.next() {
                 Ok(data) => {
-                    let client = self.clients.entry(data.id).or_insert_with(|| ClientInfo {
-                        id: data.id,
-                        first_ts: data.ts,
-                        found_startup: false,
-                        connected: false,
-                    });
-                    if !Self::forward_frames(client, data.ts, data.buf, &cmd_tx, &waker) {
+                    let id = data.id;
+                    let client = self
+                        .clients
+                        .entry(id)
+                        .or_insert_with(|| ClientInfo::new(id));
+                    client.buf.on_capture(&data);
+                    if !Self::forward_frames(client, &cmd_tx, &waker) {
                         break;
                     }
                     let elapsed_us = start.elapsed().as_micros() as u64;
@@ -78,7 +87,6 @@ impl ReplayManager {
                         sleep(Duration::from_micros(500_000));
                     }
                 }
-                Err(ReadError::Continue) => (),
                 Err(ReadError::Eof) => break,
                 Err(ReadError::Error(e)) => {
                     error!("Failed to read pcap: {e}");
@@ -111,76 +119,51 @@ impl ReplayManager {
 
     fn forward_frames(
         client: &mut ClientInfo,
-        ts: u64,
-        buf: &mut crate::capture::frame_buffer::FrameBuffer,
         cmd_tx: &Sender<ConnCommand>,
         waker: &Arc<Waker>,
     ) -> bool {
-        while buf.state != ConnState::Normal && buf.state != ConnState::CopyIn {
-            match buf.find_frame() {
-                FrameResult::Complete(info) => {
-                    if info.tag == 0 {
-                        client.found_startup = true;
-                    }
-                    buf.consume_frame(&info);
-                }
-                FrameResult::Incomplete => {
-                    return true;
-                }
-                FrameResult::Desync => {
-                    warn!("[{}] desync", client.id);
-                    buf.resync();
-                }
-            }
+        let buf = &mut client.buf;
+
+        if buf.state != ConnState::Normal && buf.state != ConnState::CopyIn {
+            return true;
         }
         if !client.connected {
-            let ts = if client.found_startup {
-                client.first_ts
-            } else {
-                0
-            };
+            let ts = buf.connect_ts;
             if !Self::send_cmd(cmd_tx, waker, ConnCommand::Connect { id: client.id, ts }) {
                 return false;
             }
             client.connected = true;
         }
-        let mut ready_frame: Option<(u8, Vec<u8>)> = None;
-        loop {
-            match buf.find_frame() {
-                FrameResult::Complete(info) => {
-                    if let Some((tag, data)) = ready_frame.take() {
-                        let cmd = ConnCommand::Send {
-                            id: client.id,
-                            ts,
-                            tag,
-                            data,
-                            flush: false,
-                        };
-                        if !Self::send_cmd(cmd_tx, waker, cmd) {
-                            return false;
-                        }
-                    }
-                    let data = buf.read_frame_full(&info).to_vec();
-                    ready_frame = Some((info.tag, data));
-                    buf.consume_frame(&info);
-                    buf.mark_read(info.stream_end);
+        let mut ready_frame: Option<(u8, u64, Vec<u8>)> = None;
+        while let Some(info) = buf.frames.pop_front() {
+            if info.tag == 0 {
+                continue;
+            }
+            if let Some((tag, ts, data)) = ready_frame.take() {
+                let cmd = ConnCommand::Send {
+                    id: client.id,
+                    ts,
+                    tag,
+                    data,
+                    flush: false,
+                };
+                if !Self::send_cmd(cmd_tx, waker, cmd) {
+                    return false;
                 }
-                FrameResult::Incomplete => {
-                    if let Some((tag, data)) = ready_frame.take() {
-                        let cmd = ConnCommand::Send {
-                            id: client.id,
-                            ts,
-                            tag,
-                            data,
-                            flush: true,
-                        };
-                        if !Self::send_cmd(cmd_tx, waker, cmd) {
-                            return false;
-                        }
-                    }
-                    break;
-                }
-                FrameResult::Desync => buf.resync(),
+            }
+            let data = buf.read_frame(&info).to_vec();
+            ready_frame = Some((info.tag, info.ts, data));
+        }
+        if let Some((tag, ts, data)) = ready_frame.take() {
+            let cmd = ConnCommand::Send {
+                id: client.id,
+                ts,
+                tag,
+                data,
+                flush: true,
+            };
+            if !Self::send_cmd(cmd_tx, waker, cmd) {
+                return false;
             }
         }
         return true;

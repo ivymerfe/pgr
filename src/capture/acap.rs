@@ -1,8 +1,5 @@
 use crate::{
-    capture::{
-        frame_buffer::FrameBuffer,
-        reader::{CaptureReader, ClientId, ReadData, ReadError, ReadResult},
-    },
+    capture::reader::{CaptureReader, CaptureData, ReadError, ReadResult},
     utils::counting_writer::CountingWriter,
 };
 use std::{
@@ -155,8 +152,7 @@ pub struct AcapReader {
     max_duration: u64,
     chunk_idx: u32,
     chunk_reader: Box<dyn Read + Send>,
-    payload_buf: Vec<u8>,
-    buffers: HashMap<ClientId, FrameBuffer>,
+    buffer: Vec<u8>,
     acc_delta: u64,
     curr_delta: u64,
     first_chunk_ts: u64,
@@ -172,8 +168,7 @@ impl AcapReader {
             max_duration,
             chunk_idx: 0,
             chunk_reader,
-            payload_buf: Vec::new(),
-            buffers: HashMap::new(),
+            buffer: Vec::new(),
             acc_delta: 0,
             curr_delta: 0,
             first_chunk_ts: 0,
@@ -187,8 +182,10 @@ impl AcapReader {
         self.curr_delta = ts.saturating_sub(self.first_chunk_ts);
         self.acc_delta + self.curr_delta
     }
+}
 
-    fn try_next(&mut self) -> Result<(u32, u64), io::Error> {
+impl CaptureReader for AcapReader {
+    fn next(&mut self) -> ReadResult<'_> {
         loop {
             let mut id_buf = [0u8; 4];
             match self.chunk_reader.read_exact(&mut id_buf) {
@@ -203,10 +200,10 @@ impl AcapReader {
                             self.curr_delta = 0;
                             continue;
                         }
-                        None => return Err(e),
+                        None => return Err(ReadError::Eof),
                     }
                 }
-                Err(e) => return Err(e),
+                Err(e) => return Err(ReadError::Error(e.to_string())),
             }
             let id = u32::from_le_bytes(id_buf);
 
@@ -218,43 +215,24 @@ impl AcapReader {
             self.chunk_reader.read_exact(&mut len_buf)?;
             let payload_len = u32::from_le_bytes(len_buf) as usize;
 
-            self.payload_buf.resize(payload_len, 0);
+            self.buffer.resize(payload_len, 0);
             if payload_len > 0 {
-                self.chunk_reader.read_exact(&mut self.payload_buf)?;
+                self.chunk_reader.read_exact(&mut self.buffer)?;
             }
-            return Ok((id, self.map_ts(ts)));
+            let ts_abs = self.map_ts(ts);
+            if ts_abs < self.ts_offset {
+                continue;
+            }
+            let ts_relative = ts_abs - self.ts_offset;
+            if ts_relative > self.max_duration {
+                return Err(ReadError::Eof);
+            }
+            return Ok(CaptureData {
+                id,
+                ts: ts_relative,
+                connect: self.buffer.is_empty(),
+                buf: &self.buffer,
+            });
         }
-    }
-}
-
-impl CaptureReader for AcapReader {
-    fn get_buffer(&mut self, id: ClientId) -> Option<&mut FrameBuffer> {
-        self.buffers.get_mut(&id)
-    }
-
-    fn next(&mut self) -> ReadResult<'_> {
-        let (id, ts_abs) = match self.try_next() {
-            Ok((id, ts)) => (id, ts),
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Err(ReadError::Eof),
-            Err(e) => return Err(e.into()),
-        };
-        if ts_abs < self.ts_offset {
-            return Err(ReadError::Continue);
-        }
-        let ts_relative = ts_abs - self.ts_offset;
-        if ts_relative > self.max_duration {
-            return Err(ReadError::Eof);
-        }
-        let fb = self.buffers.entry(id).or_default();
-        if self.payload_buf.is_empty() {
-            fb.mark_connection_start(ts_relative);
-        } else {
-            fb.extend(&self.payload_buf);
-        }
-        return Ok(ReadData {
-            id,
-            ts: ts_relative,
-            buf: fb,
-        });
     }
 }

@@ -1,3 +1,8 @@
+use std::collections::VecDeque;
+
+use crate::capture::reader::{CaptureData, ClientId};
+use tracing::warn;
+
 const CLIENT_TAGS: &[u8] = b"QPBDECfcpSHX";
 const RESYNC_CHAIN_LEN: usize = 3;
 const SSL_REQUEST_CODE: u32 = 80877103;
@@ -17,151 +22,135 @@ impl Default for ConnState {
     }
 }
 
-#[derive(Default)]
+pub struct FrameInfo {
+    pub offset: usize,
+    pub len: usize,
+    pub ts: u64,
+    pub tag: u8,
+}
+
+struct RawFrame {
+    offset: usize,
+    len: usize,
+    tag: u8,
+    code: Option<u32>,
+}
+
 pub struct FrameBuffer {
+    pub id: ClientId,
     pub data: Vec<u8>,
     pub state: ConnState,
     pub connect_ts: u64,
+    pub frame_ts: Option<u64>,
+    pub frames: VecDeque<FrameInfo>,
     buf_offset: usize,
-    read_offset: usize,
     frame_offset: usize,
 }
 
-#[derive(Debug, Copy, Clone)]
-pub struct FrameInfo {
-    pub stream_start: usize,
-    pub stream_end: usize,
-    pub body_offset: usize,
-    pub tag: u8,
-    pub code: Option<u32>,
-}
-
-pub enum FrameResult {
-    Complete(FrameInfo),
-    Incomplete,
-    Desync,
-}
-
 impl FrameBuffer {
-    pub fn mark_connection_start(&mut self, ts: u64) {
-        if self.state == ConnState::Unknown {
+    pub fn new(id: ClientId) -> Self {
+        Self {
+            id,
+            data: Vec::new(),
+            state: ConnState::Unknown,
+            connect_ts: 0,
+            frame_ts: None,
+            frames: VecDeque::new(),
+            buf_offset: 0,
+            frame_offset: 0,
+        }
+    }
+
+    pub fn on_capture(&mut self, data: &CaptureData) {
+        if data.connect && self.state == ConnState::Unknown {
             self.state = ConnState::AwaitingStartup;
-            self.frame_offset = self.buf_offset + self.data.len();
-            self.connect_ts = ts;
+            self.connect_ts = data.ts;
         }
-    }
-
-    pub fn extend(&mut self, data: &[u8]) {
-        self.data.extend_from_slice(data);
-    }
-
-    fn compact_buffer(&mut self) {
-        let read_size = self.read_offset.saturating_sub(self.buf_offset);
-        if read_size > 65_536 {
-            self.data.drain(0..read_size);
-            self.buf_offset = self.read_offset;
-        }
-    }
-
-    pub fn mark_read(&mut self, offset: usize) {
-        self.read_offset = self.read_offset.max(offset.min(self.frame_offset));
         self.compact_buffer();
-    }
+        self.data.extend_from_slice(data.buf);
 
-    pub fn frame_offset(&self) -> usize {
-        self.frame_offset
+        if self.frame_ts.is_none() {
+            self.frame_ts = Some(data.ts);
+        }
+        let frame_ts = self.frame_ts.unwrap();
+
+        let mut found = false;
+        loop {
+            if self.frame_offset >= self.buf_offset + self.data.len() {
+                break;
+            }
+            let parsed = match self.state {
+                ConnState::AwaitingStartup => self.parse_startup(self.frame_offset),
+                ConnState::Normal | ConnState::CopyIn => self.parse_tagged(self.frame_offset),
+                ConnState::Unknown => Ok(self.resync(self.frame_offset)),
+            };
+            let raw = match parsed {
+                Ok(Some(raw)) => raw,
+                Ok(None) => break,
+                Err(()) => {
+                    self.state = ConnState::Unknown;
+                    continue;
+                }
+            };
+
+            self.advance_state(&raw);
+            self.frame_offset = raw.offset + raw.len;
+            self.frames.push_back(FrameInfo {
+                offset: raw.offset,
+                len: raw.len,
+                ts: frame_ts,
+                tag: raw.tag,
+            });
+            found = true;
+        }
+        if found {
+            if self.frame_offset < self.buf_offset + self.data.len() {
+                self.frame_ts = Some(data.ts);
+            } else {
+                self.frame_ts = None;
+            }
+        }
     }
 
     pub fn read_frame(&self, info: &FrameInfo) -> &[u8] {
-        assert!(
-            info.stream_start >= self.buf_offset,
-            "read_frame has been called on destroyed frame"
-        );
-        assert!(
-            info.stream_end <= self.buf_offset + self.data.len(),
-            "read_frame has been called on incomplete frame"
-        );
-        let start_offset = info.stream_start - self.buf_offset;
-        let end_offset = info.stream_end - self.buf_offset;
-        return &self.data[start_offset + info.body_offset..end_offset];
+        let start = info.offset - self.buf_offset;
+        &self.data[start..start + info.len]
     }
 
-    pub fn read_frame_full(&self, info: &FrameInfo) -> &[u8] {
-        assert!(
-            info.stream_start >= self.buf_offset,
-            "read_frame has been called on destroyed frame"
-        );
-        assert!(
-            info.stream_end <= self.buf_offset + self.data.len(),
-            "read_frame has been called on incomplete frame"
-        );
-        let start_offset = info.stream_start - self.buf_offset;
-        let end_offset = info.stream_end - self.buf_offset;
-        return &self.data[start_offset..end_offset];
-    }
-
-    pub fn find_frame(&self) -> FrameResult {
-        if self.frame_offset < self.buf_offset {
-            unreachable!(
-                "content at self.frame_offset was destroyed, read offset could have been modified outside of mark_read"
-            );
-        }
-        let start = self.frame_offset;
-        if start > self.buf_offset + self.data.len() {
-            return FrameResult::Incomplete;
-        }
-
-        let parsed = match self.state {
-            ConnState::AwaitingStartup => self.try_parse_startup(start),
-            ConnState::Normal | ConnState::CopyIn => self.try_parse_tagged(start),
-            ConnState::Unknown => return self.read_frame_resync(start),
+    fn compact_buffer(&mut self) {
+        let offset = match self.frames.front() {
+            Some(frame) => frame.offset,
+            None => self.frame_offset,
         };
-
-        match parsed {
-            Ok(Some(info)) => FrameResult::Complete(info),
-            Ok(None) => FrameResult::Incomplete,
-            Err(()) => FrameResult::Desync,
+        let garbage_size = offset - self.buf_offset;
+        if garbage_size > 65536 {
+            let remaining = self.data.len() - garbage_size;
+            self.data.copy_within(garbage_size.., 0);
+            self.data.truncate(remaining);
+            self.buf_offset = offset;
         }
     }
 
-    pub fn consume_frame(&mut self, info: &FrameInfo) {
-        self.frame_offset = info.stream_end;
-
+    fn advance_state(&mut self, raw: &RawFrame) {
         match self.state {
-            ConnState::AwaitingStartup => {
-                self.advance_state_from_startup(info.code);
+            ConnState::AwaitingStartup => match raw.code {
+                Some(c) if c == SSL_REQUEST_CODE || c == GSS_REQUEST_CODE => {}
+                _ => self.state = ConnState::Normal,
+            },
+            ConnState::Normal if raw.tag == b'd' => self.state = ConnState::CopyIn,
+            ConnState::CopyIn if raw.tag == b'c' || raw.tag == b'f' => {
+                self.state = ConnState::Normal
             }
             ConnState::Unknown => {
-                self.state = ConnState::Normal;
+                warn!("[{}] sync to valid frame", self.id);
+                self.state = ConnState::Normal
             }
-            ConnState::Normal | ConnState::CopyIn => {
-                self.advance_state_from_tag(info.tag);
-            }
+            _ => {}
         }
     }
 
-    fn read_frame_resync(&self, start_offset: usize) -> FrameResult {
-        let end_offset = self.buf_offset + self.data.len();
-        let mut offset = start_offset;
-        while offset < end_offset {
-            if self.chain_valid(offset, RESYNC_CHAIN_LEN) {
-                match self.try_parse_tagged(offset) {
-                    Ok(Some(info)) => return FrameResult::Complete(info),
-                    _ => unreachable!("chain_valid guarantees a valid first frame"),
-                }
-            }
-            offset += 1;
-        }
-        FrameResult::Incomplete
-    }
-
-    pub fn resync(&mut self) {
-        self.state = ConnState::Unknown;
-    }
-
-    fn try_parse_startup(&self, offset: usize) -> Result<Option<FrameInfo>, ()> {
+    fn parse_startup(&self, offset: usize) -> Result<Option<RawFrame>, ()> {
         let pos = offset - self.buf_offset;
-
         let remaining = self.data.len() - pos;
         if remaining < 4 {
             return Ok(None);
@@ -170,7 +159,7 @@ impl FrameBuffer {
             return Err(());
         }
         let length = u32::from_be_bytes([
-            self.data[pos],
+            self.data[pos + 0],
             self.data[pos + 1],
             self.data[pos + 2],
             self.data[pos + 3],
@@ -181,29 +170,24 @@ impl FrameBuffer {
         if remaining < length {
             return Ok(None);
         }
-        let code = if length >= 8 {
-            Some(u32::from_be_bytes([
+        let code = (length >= 8).then(|| {
+            u32::from_be_bytes([
                 self.data[pos + 4],
                 self.data[pos + 5],
                 self.data[pos + 6],
                 self.data[pos + 7],
-            ]))
-        } else {
-            None
-        };
-        Ok(Some(FrameInfo {
-            stream_start: offset,
-            stream_end: offset + length,
-            body_offset: 4,
+            ])
+        });
+        Ok(Some(RawFrame {
+            offset,
+            len: length,
             tag: 0,
             code,
         }))
     }
 
-    // (frame_len, tag, body_start)
-    fn try_parse_tagged(&self, offset: usize) -> Result<Option<FrameInfo>, ()> {
+    fn parse_tagged(&self, offset: usize) -> Result<Option<RawFrame>, ()> {
         let pos = offset - self.buf_offset;
-
         let remaining = self.data.len() - pos;
         if remaining < 5 {
             return Ok(None);
@@ -221,41 +205,37 @@ impl FrameBuffer {
         if !(4..=10_000_000).contains(&length) {
             return Err(());
         }
-        let frame_length = 1 + length;
-        if remaining < frame_length {
+        let frame_len = 1 + length;
+        if remaining < frame_len {
             return Ok(None);
         }
-        Ok(Some(FrameInfo {
-            stream_start: offset,
-            stream_end: offset + frame_length,
-            body_offset: 5,
+        Ok(Some(RawFrame {
+            offset,
+            len: frame_len,
             tag,
             code: None,
         }))
     }
 
+    fn resync(&self, start_offset: usize) -> Option<RawFrame> {
+        let end_offset = self.buf_offset + self.data.len();
+        let mut offset = start_offset;
+        while offset < end_offset {
+            if self.chain_valid(offset, RESYNC_CHAIN_LEN) {
+                return self.parse_tagged(offset).unwrap();
+            }
+            offset += 1;
+        }
+        None
+    }
+
     fn chain_valid(&self, mut offset: usize, count: usize) -> bool {
         for _ in 0..count {
-            match self.try_parse_tagged(offset) {
-                Ok(Some(info)) => offset = info.stream_end,
+            match self.parse_tagged(offset) {
+                Ok(Some(raw)) => offset += raw.len,
                 _ => return false,
             }
         }
         true
-    }
-
-    fn advance_state_from_startup(&mut self, code: Option<u32>) {
-        match code {
-            Some(c) if c == SSL_REQUEST_CODE || c == GSS_REQUEST_CODE => {}
-            _ => self.state = ConnState::Normal,
-        }
-    }
-
-    fn advance_state_from_tag(&mut self, tag: u8) {
-        match self.state {
-            ConnState::Normal if tag == b'd' => self.state = ConnState::CopyIn,
-            ConnState::CopyIn if tag == b'c' || tag == b'f' => self.state = ConnState::Normal,
-            _ => {}
-        }
     }
 }
