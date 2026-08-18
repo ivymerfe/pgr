@@ -1,10 +1,10 @@
+use ahash::AHashMap;
 use aya::Ebpf;
 use aya::maps::{Array, MapData, RingBuf};
 use aya::programs::{SchedClassifier, TcAttachType, tc};
 
 use aya_log::EbpfLogger;
 
-use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::os::unix::io::AsRawFd;
 use std::sync::Arc;
@@ -104,8 +104,8 @@ fn start_capture(iface: &str, dst_port: u16) -> anyhow::Result<CaptureHandle> {
     })
 }
 
-#[derive(Default)]
 struct CaptureClient {
+    id: u32,
     re: Reassembler,
     buf: Vec<u8>,
 }
@@ -114,7 +114,8 @@ fn write_capture(capture: CaptureHandle, mut writer: AcapWriter) {
     let mut buf = capture.buf;
     let event_size = std::mem::size_of::<CaptureEvent>();
     let fd = buf.as_raw_fd();
-    let mut clients: HashMap<SocketAddr, CaptureClient> = HashMap::new();
+    let mut clients = AHashMap::new();
+    let mut next_client_id = 0;
     let mut total_recv = 0;
 
     let mut pfd = [
@@ -170,12 +171,26 @@ fn write_capture(capture: CaptureHandle, mut writer: AcapWriter) {
                 let is_syn = event.flags & TCP_FLAG_SYN != 0;
                 let ts = (event.timestamp_ns.saturating_sub(capture.baseline_ns) / 1000) as u32;
 
-                let client = clients.entry(addr).or_default();
+                let client = clients.entry(addr).or_insert_with(|| {
+                    let id = next_client_id;
+                    next_client_id += 1;
+                    if let Err(e) = writer.write_addr(&addr) {
+                        error!(
+                            "Failed to write client addr: {e}, id = {} addr = {}",
+                            id, addr
+                        );
+                    }
+                    CaptureClient {
+                        id,
+                        re: Reassembler::default(),
+                        buf: Vec::with_capacity(16384),
+                    }
+                });
                 let cbuf = &mut client.buf;
                 cbuf.clear();
 
                 if is_syn {
-                    if let Err(e) = writer.write(&addr, ts, &[]) {
+                    if let Err(e) = writer.write(client.id, ts, &[]) {
                         error!("Failed to write capture: {e}");
                         break 'outer;
                     }
@@ -183,7 +198,7 @@ fn write_capture(capture: CaptureHandle, mut writer: AcapWriter) {
                 total_recv += payload.len();
                 if client.re.feed(event.seq, is_syn, payload, cbuf) {
                     if !cbuf.is_empty() {
-                        if let Err(e) = writer.write(&addr, ts, &cbuf) {
+                        if let Err(e) = writer.write(client.id, ts, &cbuf) {
                             error!("Failed to write capture: {e}");
                             break 'outer;
                         }

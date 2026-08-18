@@ -1,54 +1,14 @@
 use crate::{
-    capture::reader::{CaptureReader, CaptureData, ReadError, ReadResult},
+    capture::reader::{CaptureData, CaptureReader, ReadError, ReadResult},
     utils::counting_writer::CountingWriter,
 };
 use std::{
-    collections::HashMap,
     fs::{self, File},
-    io::{self, BufRead, BufReader, Read, Write},
+    io::{self, BufReader, Read, Write},
     net::SocketAddr,
     path::PathBuf,
 };
 use zstd::{Decoder, Encoder, zstd_safe::CParameter};
-
-pub struct AcapMap {
-    file: File,
-    addrs: Vec<SocketAddr>,
-    ids: HashMap<SocketAddr, u32>,
-}
-
-impl AcapMap {
-    pub fn new(file: File) -> anyhow::Result<Self> {
-        let mut reader = BufReader::new(file);
-        let mut addrs = Vec::new();
-        let mut ids = HashMap::new();
-        let mut buf = String::with_capacity(128);
-        while reader.read_line(&mut buf)? > 0 {
-            let line = buf.trim_end();
-            if !line.is_empty() {
-                let addr: SocketAddr = line.parse()?;
-                let id = addrs.len() as u32;
-                addrs.push(addr);
-                ids.insert(addr, id);
-            }
-            buf.clear();
-        }
-        Ok(Self {
-            file: reader.into_inner(),
-            addrs,
-            ids,
-        })
-    }
-
-    pub fn get_id(&mut self, addr: SocketAddr) -> u32 {
-        *self.ids.entry(addr).or_insert_with(|| {
-            let id = self.addrs.len() as u32;
-            self.addrs.push(addr);
-            let _ = writeln!(self.file, "{}", addr);
-            id
-        })
-    }
-}
 
 pub struct AcapWriter {
     folder: PathBuf,
@@ -56,7 +16,7 @@ pub struct AcapWriter {
     chunk_idx: u32,
     compression_level: i32,
     worker_count: u8,
-    map: AcapMap,
+    map_file: File,
     chunk_writer: Encoder<'static, CountingWriter<File>>,
 }
 
@@ -68,13 +28,7 @@ impl AcapWriter {
         worker_count: u8,
     ) -> anyhow::Result<Self> {
         fs::create_dir_all(&folder)?;
-        let map = AcapMap::new(
-            File::options()
-                .create(true)
-                .read(true)
-                .append(true)
-                .open(folder.join("map"))?,
-        )?;
+        let map_file = File::create(folder.join("map"))?;
         let chunk_writer = Self::open_chunk(&folder, 0, compression_level, worker_count)?;
         Ok(Self {
             folder,
@@ -82,7 +36,7 @@ impl AcapWriter {
             chunk_idx: 0,
             compression_level,
             worker_count,
-            map,
+            map_file,
             chunk_writer,
         })
     }
@@ -111,13 +65,15 @@ impl AcapWriter {
         Ok(())
     }
 
-    pub fn write(&mut self, addr: &SocketAddr, ts: u32, data: &[u8]) -> anyhow::Result<()> {
+    pub fn write_addr(&mut self, addr: &SocketAddr) -> io::Result<()> {
+        writeln!(self.map_file, "{}", addr)
+    }
+
+    pub fn write(&mut self, id: u32, ts: u32, data: &[u8]) -> anyhow::Result<()> {
         if self.chunk_writer.get_ref().count >= self.chunk_max_size {
             self.roll_chunk()?;
         }
-        let id = self.map.get_id(addr.clone());
         let len = data.len() as u32;
-
         let w = &mut self.chunk_writer;
         w.write_all(&id.to_le_bytes())?;
         w.write_all(&ts.to_le_bytes())?;
