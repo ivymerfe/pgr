@@ -24,7 +24,7 @@ pub fn dump(mut reader: Box<dyn CaptureReader>, output: File) -> anyhow::Result<
                 buf.on_capture(&data);
                 while let Some(info) = buf.frames.pop_front() {
                     let frame = buf.read_frame(&info);
-                    write!(writer, "{:.6},{},", data.ts as f64 / 1e6, data.id,)?;
+                    write!(writer, "{:.6},{},", info.ts as f64 / 1e6, data.id,)?;
                     match parser.parse(frame) {
                         Ok(msg) => {
                             writeln!(writer, "{}", msg)?;

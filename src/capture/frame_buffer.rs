@@ -74,7 +74,6 @@ impl FrameBuffer {
         }
         let frame_ts = self.frame_ts.unwrap();
 
-        let mut found = false;
         loop {
             if self.frame_offset >= self.buf_offset + self.data.len() {
                 break;
@@ -101,14 +100,11 @@ impl FrameBuffer {
                 ts: frame_ts,
                 tag: raw.tag,
             });
-            found = true;
         }
-        if found {
-            if self.frame_offset < self.buf_offset + self.data.len() {
-                self.frame_ts = Some(data.ts);
-            } else {
-                self.frame_ts = None;
-            }
+        if self.frame_offset < self.buf_offset + self.data.len() {
+            self.frame_ts = Some(data.ts);
+        } else {
+            self.frame_ts = None;
         }
     }
 

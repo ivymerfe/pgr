@@ -76,6 +76,7 @@ pub struct ReplayLoop {
     wake_buf: [u8; 8],
 
     start: Instant,
+    started: bool,
     pending_commands: VecDeque<ConnCommand>,
     rx_closed: bool,
     timeout_ts: types::Timespec,
@@ -102,6 +103,7 @@ impl ReplayLoop {
             waker,
             wake_buf: [0u8; 8],
             start: Instant::now(),
+            started: false,
             pending_commands: VecDeque::new(),
             rx_closed: false,
             timeout_ts: types::Timespec::new(),
@@ -132,6 +134,10 @@ impl ReplayLoop {
                 }
                 error!("io_uring submit_and_wait failed: {e}");
                 break;
+            }
+            if !self.started {
+                self.start = Instant::now();
+                self.started = true;
             }
 
             self.check_cq_overflow();
