@@ -25,7 +25,7 @@ pub struct CaptureHandle {
     pub stop_waker: Arc<Waker>,
 }
 
-pub fn run_capture(writer: AcapWriter, interface: &str, port: u16) -> anyhow::Result<()> {
+pub fn run_capture(writer: AcapWriter, interface: &str, port: u16, poll_timeout: i32) -> anyhow::Result<()> {
     let capture = start_capture(interface, port)?;
     info!("Capture started");
 
@@ -37,7 +37,7 @@ pub fn run_capture(writer: AcapWriter, interface: &str, port: u16) -> anyhow::Re
     })
     .expect("Error setting Ctrl-C handler");
 
-    write_capture(capture, writer);
+    write_capture(capture, writer, poll_timeout);
     Ok(())
 }
 
@@ -110,7 +110,7 @@ struct CaptureClient {
     buf: Vec<u8>,
 }
 
-fn write_capture(capture: CaptureHandle, mut writer: AcapWriter) {
+fn write_capture(capture: CaptureHandle, mut writer: AcapWriter, poll_timeout: i32) {
     let mut buf = capture.buf;
     let event_size = std::mem::size_of::<CaptureEvent>();
     let fd = buf.as_raw_fd();
@@ -134,7 +134,7 @@ fn write_capture(capture: CaptureHandle, mut writer: AcapWriter) {
     'outer: loop {
         pfd[0].revents = 0;
         pfd[1].revents = 0;
-        let ret = unsafe { libc::poll(pfd.as_mut_ptr(), 2, -1) };
+        let ret = unsafe { libc::poll(pfd.as_mut_ptr(), 2, poll_timeout) };
         if ret < 0 {
             let err = std::io::Error::last_os_error();
             if err.kind() == std::io::ErrorKind::Interrupted {

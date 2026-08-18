@@ -1,7 +1,5 @@
 use aya_ebpf::{
-    cty::c_void,
-    helpers::generated::{bpf_ktime_get_ns, bpf_loop, bpf_skb_load_bytes},
-    programs::TcContext,
+    bindings::BPF_RB_NO_WAKEUP, cty::c_void, helpers::generated::{bpf_ktime_get_ns, bpf_loop, bpf_skb_load_bytes}, programs::TcContext,
 };
 use aya_log_ebpf::info;
 use capture_common::{CHUNK_SIZE, CaptureEvent};
@@ -65,7 +63,7 @@ extern "C" fn send_chunk(index: u64, data: *mut c_void) -> i32 {
             return 1;
         }
     }
-    entry.submit(0);
+    entry.submit(BPF_RB_NO_WAKEUP as u64);
     0
 }
 

@@ -110,6 +110,9 @@ enum Commands {
             help = "Number of compression worker threads"
         )]
         zw: u8,
+
+        #[arg(long, default_value_t = 2, help = "Ring buffer poll timeout (ms)")]
+        poll_timeout: i32,
     },
     #[command(about = "Compress a file with zstd")]
     Compress {
@@ -195,6 +198,7 @@ fn run_command(cli: Cli) -> anyhow::Result<()> {
             max_chunk,
             level,
             zw,
+            poll_timeout,
         } => {
             if output.exists() {
                 if !output.is_dir() {
@@ -218,7 +222,7 @@ fn run_command(cli: Cli) -> anyhow::Result<()> {
                 max_chunk, level, zw
             );
             let writer = AcapWriter::new(output, max_chunk.as_u64(), level, zw)?;
-            capture::ebpf::run_capture(writer, &interface, port)?
+            capture::ebpf::run_capture(writer, &interface, port, poll_timeout)?
         }
         Commands::Compress {
             input,
