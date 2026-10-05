@@ -1,8 +1,8 @@
 /target
 /data
-/capture-ebpf/src/vmlinux.rs
 /zz_*/
 *.pcap
 *.csv
 *.lat
 *.json.gz
+.DS_Store

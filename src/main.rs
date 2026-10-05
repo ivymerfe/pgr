@@ -25,7 +25,6 @@ mod dump;
 mod proto;
 mod replay;
 mod utils;
-mod zstd_test;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None, arg_required_else_help = true, disable_help_flag = true)]
@@ -77,60 +76,6 @@ enum Commands {
 
         #[arg(long, help = "File to save differences to")]
         delta: Option<PathBuf>,
-    },
-    #[command(about = "Capture traffic")]
-    Capture {
-        #[arg(
-            short,
-            long,
-            default_value = "zz_cap",
-            value_parser = parse_absolute,
-            help = "Folder to write the capture to"
-        )]
-        output: PathBuf,
-
-        #[arg(short, long, default_value_t = false, help = "Force rewrite capture")]
-        rewrite: bool,
-
-        #[arg(short, long, default_value = "lo", help = "Network interface")]
-        interface: String,
-
-        #[arg(short, long, default_value_t = 5432, help = "Port to capture")]
-        port: u16,
-
-        #[arg(short, long, default_value = "1GiB", help = "Maximum chunk size")]
-        max_chunk: ByteSize,
-
-        #[arg(short, long, default_value_t = 3, help = "zstd compression level")]
-        level: i32,
-
-        #[arg(
-            long,
-            default_value_t = 4,
-            help = "Number of compression worker threads"
-        )]
-        zw: u8,
-
-        #[arg(long, default_value_t = 2, help = "Ring buffer poll timeout (ms)")]
-        poll_timeout: i32,
-    },
-    #[command(about = "Compress a file with zstd")]
-    Compress {
-        #[arg(value_parser = parse_absolute, help = "Input file")]
-        input: PathBuf,
-
-        #[arg(short, long, value_parser = parse_absolute, help = "Output file")]
-        output: PathBuf,
-
-        #[arg(short, long, default_value_t = 3, help = "zstd compression level")]
-        level: i32,
-
-        #[arg(
-            long,
-            default_value_t = 4,
-            help = "Number of compression worker threads"
-        )]
-        zw: u8,
     },
 }
 
@@ -189,53 +134,6 @@ fn run_command(cli: Cli) -> anyhow::Result<()> {
                 info!("Deltas: {}", delta.display());
             }
             compare::compare(src_reader, replay_reader, delta_writer)?;
-        }
-        Commands::Capture {
-            output,
-            rewrite,
-            interface,
-            port,
-            max_chunk,
-            level,
-            zw,
-            poll_timeout,
-        } => {
-            if output.exists() {
-                if !output.is_dir() {
-                    return Err(anyhow!("Not a directory: {}", output.display()));
-                }
-                if rewrite {
-                    fs::remove_dir_all(&output)?;
-                } else {
-                    return Err(anyhow!("Output directory exists: {}", output.display()));
-                }
-            }
-            fs::create_dir(&output)?;
-            info!(
-                "Capturing if={},port={} => {}",
-                interface,
-                port,
-                output.display()
-            );
-            info!(
-                "Max chunk size = {} Compression level = {}, zstd workers = {}",
-                max_chunk, level, zw
-            );
-            let writer = AcapWriter::new(output, max_chunk.as_u64(), level, zw)?;
-            capture::ebpf::run_capture(writer, &interface, port, poll_timeout)?
-        }
-        Commands::Compress {
-            input,
-            output,
-            level,
-            zw,
-        } => {
-            let in_file = files::try_open(&input)?;
-            let out_file = files::try_create(&output, "zst")?;
-            info!("Compressing {} -> {}", input.display(), output.display());
-            info!("Level = {level}, workers = {zw}");
-            let dur = zstd_test::compress(in_file, out_file, level, zw)?;
-            info!("Time taken: {}ms", dur.as_millis());
         }
     }
     Ok(())

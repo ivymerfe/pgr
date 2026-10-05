@@ -1,5 +1,7 @@
 use etherparse::{InternetSlice, SlicedPacket, TcpSlice, TransportSlice};
-use pcap_parser::{traits::PcapReaderIterator, *};
+use pcap_parser::{
+    Block, Linktype, PcapBlockOwned, PcapError, create_reader, traits::PcapReaderIterator,
+};
 use std::{collections::HashMap, io::Read, net::SocketAddr};
 
 use crate::capture::{
@@ -23,6 +25,9 @@ pub struct PcapReader<'a> {
     addr_map: HashMap<SocketAddr, ClientId>,
     next_id: u32,
     pub first_ts: u64,
+
+    interfaces: Vec<Linktype>,
+    legacy_linktype: Option<Linktype>,
 }
 
 impl<'a> PcapReader<'a> {
@@ -42,6 +47,8 @@ impl<'a> PcapReader<'a> {
             addr_map: HashMap::new(),
             next_id: 0,
             first_ts: 0,
+            interfaces: Vec::new(),
+            legacy_linktype: None,
         })
     }
 }
@@ -57,42 +64,83 @@ impl<'a> CaptureReader for PcapReader<'a> {
         loop {
             match self.pcap.next() {
                 Ok((consumed, block)) => {
-                    if let Some(packet) = process_block(block, self.port) {
-                        if self.first_ts == 0 {
-                            self.first_ts = packet.ts;
+                    let packet_info = match &block {
+                        PcapBlockOwned::LegacyHeader(hdr) => {
+                            self.legacy_linktype = Some(hdr.network);
+                            None
                         }
-                        let ts_abs = packet.ts.saturating_sub(self.first_ts);
-                        if ts_abs < self.ts_offset {
+                        PcapBlockOwned::Legacy(p) => {
+                            let ts = (p.ts_sec as u64) * 1_000_000 + (p.ts_usec as u64);
+                            let linktype = self.legacy_linktype.unwrap_or(Linktype::NULL);
+                            Some((p.data, linktype, ts))
+                        }
+                        PcapBlockOwned::NG(Block::InterfaceDescription(idb)) => {
+                            self.interfaces.push(idb.linktype);
+                            None
+                        }
+                        PcapBlockOwned::NG(Block::EnhancedPacket(p)) => {
+                            let ts = ((p.ts_high as u64) << 32) | (p.ts_low as u64);
+                            let if_id = p.if_id as usize;
+                            let linktype = self
+                                .interfaces
+                                .get(if_id)
+                                .copied()
+                                .unwrap_or(Linktype::NULL);
+                            Some((p.data, linktype, ts))
+                        }
+                        PcapBlockOwned::NG(Block::SimplePacket(p)) => {
+                            let linktype =
+                                self.interfaces.first().copied().unwrap_or(Linktype::NULL);
+                            Some((p.data, linktype, 0))
+                        }
+                        _ => None,
+                    };
+                    if let Some((packet_data, linktype, ts)) = packet_info {
+                        if let Some(packet) = process_packet(packet_data, linktype, ts, self.port) {
+                            if self.first_ts == 0 {
+                                self.first_ts = packet.ts;
+                            }
+
+                            let ts_abs = packet.ts.saturating_sub(self.first_ts);
+                            if ts_abs < self.ts_offset {
+                                self.pcap.consume_noshift(consumed);
+                                continue;
+                            }
+
+                            let ts_relative = ts_abs - self.ts_offset;
+                            if ts_relative > self.max_duration {
+                                return Err(ReadError::Eof);
+                            }
+
+                            let addr = packet.addr;
+                            let next_id = self.next_id;
+                            let id = *self.addr_map.entry(addr).or_insert_with(|| {
+                                let assigned = next_id;
+                                self.next_id += 1;
+                                assigned
+                            });
+
+                            let tcp = packet.tcp;
+                            let re = self.reassemblers.entry(id).or_default();
+                            self.buffer.clear();
+
+                            re.feed(
+                                tcp.sequence_number(),
+                                tcp.syn(),
+                                tcp.payload(),
+                                &mut self.buffer,
+                            );
+
+                            let is_connect = tcp.syn();
                             self.pcap.consume_noshift(consumed);
-                            continue;
+
+                            return Ok(CaptureData {
+                                id,
+                                ts: ts_relative,
+                                connect: is_connect,
+                                buf: &self.buffer,
+                            });
                         }
-                        let ts_relative = ts_abs - self.ts_offset;
-                        if ts_relative > self.max_duration {
-                            return Err(ReadError::Eof);
-                        }
-                        let addr = packet.addr;
-                        let id = *self.addr_map.entry(addr).or_insert_with(|| {
-                            let id = self.next_id;
-                            self.next_id += 1;
-                            id
-                        });
-                        let tcp = packet.tcp;
-                        let re = self.reassemblers.entry(id).or_default();
-                        self.buffer.clear();
-                        re.feed(
-                            tcp.sequence_number(),
-                            tcp.syn(),
-                            tcp.payload(),
-                            &mut self.buffer,
-                        );
-                        let is_connect = tcp.syn();
-                        self.pcap.consume_noshift(consumed);
-                        return Ok(CaptureData {
-                            id,
-                            ts: ts_relative,
-                            connect: is_connect,
-                            buf: &self.buffer,
-                        });
                     }
                     self.pcap.consume_noshift(consumed);
                 }
@@ -106,29 +154,59 @@ impl<'a> CaptureReader for PcapReader<'a> {
     }
 }
 
-pub fn process_block(block: PcapBlockOwned, port: u16) -> Option<TsPacket> {
-    let (packet_data, ts) = match block {
-        PcapBlockOwned::Legacy(p) => {
-            let ts = (p.ts_sec as u64) * 1_000_000 + (p.ts_usec as u64);
-            (p.data, ts)
-        }
-        PcapBlockOwned::NG(Block::EnhancedPacket(p)) => {
-            let ts = ((p.ts_high as u64) << 32) | (p.ts_low as u64);
-            (p.data, ts)
-        }
-        PcapBlockOwned::NG(Block::SimplePacket(p)) => (p.data, 0),
-        _ => {
-            return None;
-        }
-    };
+pub fn process_packet<'a>(
+    packet_data: &'a [u8],
+    linktype: Linktype,
+    ts: u64,
+    port: u16,
+) -> Option<TsPacket<'a>> {
     if !packet_data.is_empty() {
-        if let Some(packet) = parse_packet(&packet_data) {
+        if let Some(packet) = parse_packet_by_linktype(packet_data, linktype) {
             if let Some((addr, tcp)) = filter_packet(packet, port) {
                 return Some(TsPacket { addr, ts, tcp });
             }
         }
     }
-    return None;
+    None
+}
+
+fn parse_packet_by_linktype<'a>(data: &'a [u8], linktype: Linktype) -> Option<SlicedPacket<'a>> {
+    match linktype {
+        Linktype::ETHERNET => SlicedPacket::from_ethernet(data).ok(),
+
+        Linktype::NULL => {
+            if data.len() < 4 {
+                return None;
+            }
+            let family = u32::from_ne_bytes([data[0], data[1], data[2], data[3]]);
+            if family == 2 || family == 24 || family == 30 {
+                SlicedPacket::from_ip(&data[4..]).ok()
+            } else {
+                None
+            }
+        }
+
+        Linktype::RAW => SlicedPacket::from_ip(data).ok(),
+
+        Linktype::LINUX_SLL => SlicedPacket::from_linux_sll(data).ok(),
+
+        Linktype(149) => {
+            if data.len() >= 8 && &data[0..4] == b"PKT1" {
+                let pkt_len = u32::from_le_bytes([data[4], data[5], data[6], data[7]]) as usize;
+                if data.len() > pkt_len {
+                    let payload = &data[pkt_len..];
+                    return SlicedPacket::from_ethernet(payload)
+                        .or_else(|_| SlicedPacket::from_ip(payload))
+                        .ok();
+                }
+            }
+            None
+        }
+
+        _ => SlicedPacket::from_ip(data)
+            .or_else(|_| SlicedPacket::from_ethernet(data))
+            .ok(),
+    }
 }
 
 fn filter_packet(packet: SlicedPacket, port: u16) -> Option<(SocketAddr, TcpSlice)> {
@@ -147,26 +225,4 @@ fn filter_packet(packet: SlicedPacket, port: u16) -> Option<(SocketAddr, TcpSlic
     } else {
         None
     }
-}
-
-fn parse_packet(packet_data: &'_ [u8]) -> Option<SlicedPacket<'_>> {
-    if packet_data.len() > 20 {
-        let protocol = u16::from_be_bytes([packet_data[0], packet_data[1]]);
-        // 0x86DD = IPv6, 0x0800 = IPv4
-        if protocol == 0x86DD || protocol == 0x0800 {
-            if let Ok(p) = SlicedPacket::from_ip(&packet_data[20..]) {
-                return Some(p);
-            }
-        }
-    }
-    if let Ok(p) = SlicedPacket::from_ethernet(packet_data) {
-        return Some(p);
-    }
-    if let Ok(p) = SlicedPacket::from_linux_sll(packet_data) {
-        return Some(p);
-    }
-    if let Ok(p) = SlicedPacket::from_ip(packet_data) {
-        return Some(p);
-    }
-    None
 }

@@ -14,7 +14,6 @@ use crate::{
         r#loop::{ConnCommand, ReplayLoop},
         stats::ReplayStats,
     },
-    utils::waker::Waker,
 };
 
 struct ClientInfo {
@@ -105,7 +104,7 @@ impl ReplayManager {
         Ok(())
     }
 
-    fn send_cmd(cmd_tx: &Sender<ConnCommand>, waker: &Arc<Waker>, cmd: ConnCommand) -> bool {
+    fn send_cmd(cmd_tx: &Sender<ConnCommand>, waker: &Arc<mio::Waker>, cmd: ConnCommand) -> bool {
         if cmd_tx.send(cmd).is_err() {
             error!("ctl thread gone, dropping command");
             return false;
@@ -120,7 +119,7 @@ impl ReplayManager {
     fn forward_frames(
         client: &mut ClientInfo,
         cmd_tx: &Sender<ConnCommand>,
-        waker: &Arc<Waker>,
+        waker: &Arc<mio::Waker>,
     ) -> bool {
         let buf = &mut client.buf;
 

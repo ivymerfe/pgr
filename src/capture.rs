@@ -9,7 +9,6 @@ use crate::utils::files;
 use anyhow::anyhow;
 
 pub mod acap;
-pub mod ebpf;
 pub mod frame_buffer;
 pub mod pcap;
 pub mod reader;

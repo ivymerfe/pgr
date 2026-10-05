@@ -3,16 +3,7 @@ name = "pgr"
 version = "0.2.2"
 edition = "2024"
 
-[workspace]
-members = [
-    ".",
-    "capture-ebpf",
-    "capture-common",
-]
-
 [dependencies]
-aya = "0.14.0"
-capture-common = { path = "capture-common", features = ["user"] }
 clap = { version = "4.6.4", features = ["derive"] }
 etherparse = "0.21.0"
 md5 = "0.8.1"
@@ -25,10 +16,9 @@ libc = "0.2.189"
 crossbeam-channel = "0.5.16"
 anyhow = "1.0.104"
 bytesize = "2.7.0"
-aya-log = "0.3.0"
 humantime = "2.4.0"
 quanta = "0.12.6"
 ctrlc = "3.5.2"
-io-uring = "0.7.13"
 socket2 = "0.6.5"
 ahash = "0.8.12"
+mio = { version = "1.2.4", features = ["os-poll", "net"] }
