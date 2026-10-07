@@ -1,13 +1,16 @@
 use clap::{Parser, Subcommand};
 
-use std::io::BufWriter;
-use std::net::IpAddr;
-use std::path::PathBuf;
 use std::env;
+use std::fs::File;
+use std::io::{BufReader, BufWriter};
+use std::net::IpAddr;
+use std::path::{Path, PathBuf};
 
 use time::{UtcOffset, macros::format_description};
 use tracing::{error, info};
 use tracing_subscriber::fmt::time::OffsetTime;
+
+use anyhow::anyhow;
 
 use crate::capture::read_capture;
 use crate::capture_desc::CaptureDesc;
@@ -19,6 +22,7 @@ mod capture;
 mod capture_desc;
 mod compare;
 mod dump;
+mod parse;
 mod proto;
 mod replay;
 mod utils;
@@ -70,6 +74,14 @@ enum Commands {
 
         #[arg(long, help = "File to save differences to")]
         delta: Option<PathBuf>,
+    },
+    #[command(about = "Convert extension capture to mini and print WAL sync point")]
+    Parse {
+        #[arg(value_parser = parse_absolute, help = "Extension capture file")]
+        input: PathBuf,
+
+        #[arg(short, long, default_value = "capture.mini", value_parser = parse_absolute, help = "Output mini path")]
+        output: PathBuf,
     },
 }
 
@@ -128,16 +140,50 @@ fn run_command(cli: Cli) -> anyhow::Result<()> {
             }
             compare::compare(src_reader, replay_reader, delta_writer)?;
         }
+        Commands::Parse { input, output } => {
+            let path = if input.is_dir() {
+                latest_capture(&input)?
+            } else {
+                input
+            };
+            info!("Parsing {}", path.display());
+            let reader = BufReader::new(File::open(&path)?);
+            let output_file = files::try_create(&output, "mini")?;
+            let lsn = parse::parse(reader, output_file)?;
+            info!("Sync LSN {:X}/{:08X}", lsn >> 32, lsn as u32);
+        }
     }
     Ok(())
 }
 
 fn parse_absolute(s: &str) -> Result<PathBuf, String> {
-    std::path::absolute(s).map_err(|e| e.to_string())
+    std::fs::canonicalize(s).map_err(|e| e.to_string())
 }
 
 fn default_username() -> String {
     env::var("USER")
         .or_else(|_| env::var("LOGNAME"))
         .unwrap_or_else(|_| String::from("postgres"))
+}
+
+fn latest_capture(dir: &Path) -> anyhow::Result<PathBuf> {
+    let mut best: Option<(u64, PathBuf)> = None;
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("pr") {
+            continue;
+        }
+        let Some(ts) = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(|s| s.parse::<u64>().ok())
+        else {
+            continue;
+        };
+        if best.as_ref().map_or(true, |(b, _)| ts > *b) {
+            best = Some((ts, path));
+        }
+    }
+    best.map(|(_, p)| p)
+        .ok_or_else(|| anyhow!("no .pr files in {}", dir.display()))
 }
