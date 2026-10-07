@@ -1,17 +1,18 @@
 #include "pgr.h"
 #include "ring.h"
 
-#include "access/xlog.h"
-#include "utils/timestamp.h"
-
 SharedMemory *Shmem = NULL;
 
 void shmem_init() {
   pg_atomic_init_u32(&Shmem->capture_running, 0);
   pg_atomic_init_u32(&Shmem->capture_id, 0);
   pg_atomic_init_u32(&Shmem->next_client_id, 0);
-  pg_atomic_init_u64(&Shmem->start_lsn, 0);
-  pg_atomic_init_u64(&Shmem->start_ts, 0);
+  pg_atomic_init_u32(&Shmem->start_gen, 0);
+  pg_atomic_init_u32(&Shmem->wal_ready, 0);
+  SpinLockInit(&Shmem->lock);
+  Shmem->open_xacts = 0;
+  Shmem->pending_xacts = 0;
+  Shmem->worker_latch = NULL;
   ring_init(&Shmem->capture_ring);
 }
 
@@ -27,13 +28,14 @@ void capture_reset() {
   pgr_wakeup_worker();
 }
 
+
 void capture_start() {
-  XLogRecPtr lsn = GetXLogInsertRecPtr();
-  TimestampTz ts = GetCurrentTimestamp();
-  pg_atomic_write_u64(&Shmem->start_lsn, lsn);
-  pg_atomic_write_u64(&Shmem->start_ts, (uint64)ts);
-  pg_write_barrier();
+  SpinLockAcquire(&Shmem->lock);
+  pg_atomic_write_u32(&Shmem->wal_ready, 0);
+  pg_atomic_fetch_add_u32(&Shmem->start_gen, 1);
+  Shmem->pending_xacts = Shmem->open_xacts;
   pg_atomic_write_u32(&Shmem->capture_running, 1);
+  SpinLockRelease(&Shmem->lock);
   capture_reset();
 }
 
@@ -57,12 +59,29 @@ uint32 acquire_client_id() {
   return pg_atomic_fetch_add_u32(&Shmem->next_client_id, 1);
 }
 
-TimestampTz get_capture_start_ts() {
-  pg_read_barrier();
-  return (TimestampTz)pg_atomic_read_u64(&Shmem->start_ts);
+
+uint32 xact_enter_shared() {
+  uint32 gen;
+  SpinLockAcquire(&Shmem->lock);
+  Shmem->open_xacts++;
+  gen = is_capture_running() ? pg_atomic_read_u32(&Shmem->start_gen) : 0;
+  SpinLockRelease(&Shmem->lock);
+  return gen;
 }
 
-XLogRecPtr get_capture_start_lsn() {
-  pg_read_barrier();
-  return (XLogRecPtr)pg_atomic_read_u64(&Shmem->start_lsn);
+bool xact_leave_shared(uint32 gen) {
+  bool last = false;
+  SpinLockAcquire(&Shmem->lock);
+  Shmem->open_xacts--;
+  if (is_capture_running() && gen != pg_atomic_read_u32(&Shmem->start_gen) &&
+      Shmem->pending_xacts > 0) {
+    last = --Shmem->pending_xacts == 0;
+  }
+  SpinLockRelease(&Shmem->lock);
+  return last;
+}
+
+bool xact_is_pre(uint32 gen) {
+  return is_capture_running() &&
+         gen != pg_atomic_read_u32(&Shmem->start_gen);
 }

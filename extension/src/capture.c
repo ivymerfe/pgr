@@ -1,5 +1,7 @@
 #include "pgr.h"
 
+#include "access/xact.h"
+#include "access/xlog.h"
 #include "commands/prepare.h"
 #include "fmgr.h"
 #include "nodes/params.h"
@@ -10,67 +12,54 @@
 
 static char CaptureBuffer[1024 * 1024];
 static size_t CaptureBufferPos = 0;
+static bool CaptureOverflow = false;
 
-static void cap_u8(uint8_t value) {
-  if (CaptureBufferPos + sizeof(value) > sizeof(CaptureBuffer)) {
+static void cap_raw(const void *data, size_t len) {
+  if (CaptureOverflow || CaptureBufferPos + len > sizeof(CaptureBuffer)) {
+    CaptureOverflow = true;
     return;
   }
-  CaptureBuffer[CaptureBufferPos++] = value;
-}
-
-static void cap_u16(uint16_t value) {
-  if (CaptureBufferPos + sizeof(value) > sizeof(CaptureBuffer)) {
-    return;
-  }
-  memcpy(&CaptureBuffer[CaptureBufferPos], &value, sizeof(value));
-  CaptureBufferPos += sizeof(value);
-}
-
-static void cap_u32(uint32_t value) {
-  if (CaptureBufferPos + sizeof(value) > sizeof(CaptureBuffer)) {
-    return;
-  }
-  memcpy(&CaptureBuffer[CaptureBufferPos], &value, sizeof(value));
-  CaptureBufferPos += sizeof(value);
-}
-
-static void cap_u64(uint64_t value) {
-  if (CaptureBufferPos + sizeof(value) > sizeof(CaptureBuffer)) {
-    return;
-  }
-  memcpy(&CaptureBuffer[CaptureBufferPos], &value, sizeof(value));
-  CaptureBufferPos += sizeof(value);
-}
-
-static void cap_str(const char *str) {
-  size_t len = strlen(str);
-  if (CaptureBufferPos + len + 4 > sizeof(CaptureBuffer)) {
-    return;
-  }
-  cap_u32(len);
-  memcpy(&CaptureBuffer[CaptureBufferPos], str, len);
+  memcpy(&CaptureBuffer[CaptureBufferPos], data, len);
   CaptureBufferPos += len;
 }
 
+static void cap_u8(uint8_t v) { cap_raw(&v, sizeof(v)); }
+static void cap_u16(uint16_t v) { cap_raw(&v, sizeof(v)); }
+static void cap_u32(uint32_t v) { cap_raw(&v, sizeof(v)); }
+static void cap_u64(uint64_t v) { cap_raw(&v, sizeof(v)); }
+
+static void cap_bytes(const char *data, uint32_t len) {
+  cap_u32(len);
+  cap_raw(data, len);
+}
+
+static void cap_str(const char *str) { cap_bytes(str, strlen(str)); }
+
 static void cap_begin(uint8_t type) {
   CaptureBufferPos = 0;
+  CaptureOverflow = false;
   cap_u8(type);
   cap_u32(MyClientId);
   cap_u64(GetCurrentTimestamp());
 }
 
 static void cap_end() {
-  if (CaptureBufferPos > 0) {
-    ereport(LOG, (errmsg("pgr: sending capture message of size %zu",
-                         CaptureBufferPos)));
+  if (CaptureOverflow) {
+    ereport(WARNING, (errmsg("pgr: capture message dropped, too large")));
+  } else if (CaptureBufferPos > 0) {
     ring_push(&Shmem->capture_ring, CaptureBuffer, CaptureBufferPos);
-    CaptureBufferPos = 0;
     if (Shmem->worker_latch) {
       SetLatch(Shmem->worker_latch);
     }
   }
+  CaptureBufferPos = 0;
+  CaptureOverflow = false;
 }
+
 static void cap_patch_u32(size_t pos, uint32_t value) {
+  if (CaptureOverflow) {
+    return;
+  }
   memcpy(&CaptureBuffer[pos], &value, sizeof(value));
 }
 
@@ -165,15 +154,16 @@ void capture_bind(const char *portal, const char *stmt, int nrf, int16 *rf,
   for (int i = 0; i < np; i++) {
     ParamExternData *p = &params->params[i];
     cap_u32(p->ptype);
-    cap_u8(p->isnull);
-    if (!p->isnull) {
-      Oid outfunc;
-      bool isvarlena;
-      getTypeOutputInfo(p->ptype, &outfunc, &isvarlena);
-      char *s = OidOutputFunctionCall(outfunc, p->value);
-      cap_str(s);
-      pfree(s);
+    if (p->isnull) {
+      cap_u32(UINT32_MAX);
+      continue;
     }
+    Oid outfunc;
+    bool isvarlena;
+    getTypeOutputInfo(p->ptype, &outfunc, &isvarlena);
+    char *s = OidOutputFunctionCall(outfunc, p->value);
+    cap_bytes(s, strlen(s));
+    pfree(s);
   }
   cap_end();
 }
@@ -187,5 +177,24 @@ void capture_execute(const char *portal, long max_rows) {
 
 void capture_sync() {
   cap_begin(MsgTypeSync);
+  cap_end();
+}
+
+void capture_tx_start() {
+  cap_begin(MsgTypeTxStart);
+  cap_end();
+}
+
+void capture_tx_end(bool committed) {
+  cap_begin(MsgTypeTxEnd);
+  cap_u8(committed);
+  cap_u32(GetTopTransactionIdIfAny());
+  cap_u64(GetXLogInsertRecPtr());
+  cap_end();
+}
+
+void capture_lsn(XLogRecPtr lsn) {
+  cap_begin(MsgTypeLsn);
+  cap_u64(lsn);
   cap_end();
 }

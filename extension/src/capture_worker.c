@@ -45,16 +45,6 @@ static bool start_capture() {
   }
   setvbuf(f, NULL, _IOFBF, 64 * 1024);
   CaptureFile = f;
-
-  uint8 type = MsgTypeCaptureStart;
-  uint32 client = 0;
-  uint64 ts = (uint64)GetCurrentTimestamp();
-  uint64 lsn = (uint64)get_capture_start_lsn();
-  fwrite(&type, sizeof(type), 1, f);
-  fwrite(&client, sizeof(client), 1, f);
-  fwrite(&ts, sizeof(ts), 1, f);
-  fwrite(&lsn, sizeof(lsn), 1, f);
-  fflush(f);
   return true;
 }
 
