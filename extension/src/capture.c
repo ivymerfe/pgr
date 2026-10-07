@@ -71,9 +71,19 @@ static bool guc_is_session_state(struct config_generic *guc) {
 
 static void cap_plansource(const char *name, bool from_sql,
                            CachedPlanSource *src) {
+  const char *q = src->query_string;
+  size_t len = strlen(q);
+  RawStmt *raw = src->raw_parse_tree;
+  if (raw && raw->stmt_location >= 0 && (size_t)raw->stmt_location <= len) {
+    q += raw->stmt_location;
+    len -= raw->stmt_location;
+    if (raw->stmt_len > 0 && (size_t)raw->stmt_len < len) {
+      len = raw->stmt_len;
+    }
+  }
   cap_str(name);
   cap_u8(from_sql);
-  cap_str(src->query_string);
+  cap_bytes(q, len);
   cap_u16(src->num_params);
   for (int i = 0; i < src->num_params; i++)
     cap_u32(src->param_types[i]);
