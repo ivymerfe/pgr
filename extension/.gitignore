@@ -1,0 +1,6 @@
+*.o
+*.so
+*.dylib
+.deps
+.cache
+.DS_Store
