@@ -17,7 +17,6 @@ pub struct ReplayConfig {
     pub password: Option<String>,
     pub dbname: String,
     pub application_name: String,
-    pub ring_size: u32,
 }
 
 #[derive(PartialEq)]
@@ -34,7 +33,6 @@ impl ReplayConfig {
         dbname: String,
         user: String,
         password: Option<String>,
-        ring_size: u32,
     ) -> Self {
         ReplayConfig {
             server: SocketAddr::new(host, port),
@@ -42,7 +40,6 @@ impl ReplayConfig {
             password,
             dbname,
             application_name: "pgr".to_string(),
-            ring_size,
         }
     }
 }

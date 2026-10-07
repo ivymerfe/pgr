@@ -1,17 +1,14 @@
-use anyhow::anyhow;
-use bytesize::ByteSize;
 use clap::{Parser, Subcommand};
 
 use std::io::BufWriter;
 use std::net::IpAddr;
 use std::path::PathBuf;
-use std::{env, fs};
+use std::env;
 
 use time::{UtcOffset, macros::format_description};
 use tracing::{error, info};
 use tracing_subscriber::fmt::time::OffsetTime;
 
-use crate::capture::acap::AcapWriter;
 use crate::capture::read_capture;
 use crate::capture_desc::CaptureDesc;
 use crate::replay::client::ReplayConfig;
@@ -54,9 +51,6 @@ enum Commands {
 
         #[arg(short = 'P', long, help = "Password")]
         pass: Option<String>,
-
-        #[arg(long, default_value_t = 2048, help = "io_uring ring size")]
-        ring_size: u32,
     },
     #[command(about = "Dump a capture to CSV")]
     Dump {
@@ -109,11 +103,10 @@ fn run_command(cli: Cli) -> anyhow::Result<()> {
             dbname,
             user,
             pass,
-            ring_size,
         } => {
             let reader = read_capture(&input)?;
             info!("Replaying {input} -> {host}:{port} dbname={dbname} user={user}");
-            let config = ReplayConfig::new(host, port, dbname, user, pass, ring_size);
+            let config = ReplayConfig::new(host, port, dbname, user, pass);
             let mut mgr = ReplayManager::new();
             mgr.replay(config, reader)?;
         }

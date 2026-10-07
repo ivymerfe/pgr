@@ -30,7 +30,6 @@ pub enum ConnCommand {
         ts: u64,
         tag: u8,
         data: Vec<u8>,
-        flush: bool,
     },
     Terminate {
         ts: u64,
@@ -175,18 +174,10 @@ impl ReplayLoop {
             ConnCommand::Connect { id, .. } => {
                 self.connect_client(conns, id);
             }
-            ConnCommand::Send {
-                id,
-                tag,
-                data,
-                flush,
-                ..
-            } => {
+            ConnCommand::Send { id, tag, data, .. } => {
                 if let Some(conn) = conns.get_mut(&id) {
                     conn.client.replay_frame(tag, &data);
-                    if flush {
-                        flush_conn(conn);
-                    }
+                    flush_conn(conn);
                 }
                 self.remove_if_dead(conns, id);
             }

@@ -1,6 +1,6 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
-use crate::capture::reader::{CaptureData, ClientId};
+use crate::capture::reader::{ClientId};
 use tracing::warn;
 
 const CLIENT_TAGS: &[u8] = b"QPBDECfcpSHX";
@@ -40,11 +40,13 @@ pub struct FrameBuffer {
     pub id: ClientId,
     pub data: Vec<u8>,
     pub state: ConnState,
-    pub connect_ts: u64,
     pub frame_ts: Option<u64>,
     pub frames: VecDeque<FrameInfo>,
     buf_offset: usize,
     frame_offset: usize,
+
+    next_seq: Option<u32>,
+    out_of_order: BTreeMap<u32, Vec<u8>>,
 }
 
 impl FrameBuffer {
@@ -53,24 +55,69 @@ impl FrameBuffer {
             id,
             data: Vec::new(),
             state: ConnState::Unknown,
-            connect_ts: 0,
             frame_ts: None,
             frames: VecDeque::new(),
             buf_offset: 0,
             frame_offset: 0,
+            next_seq: None,
+            out_of_order: BTreeMap::new(),
         }
     }
 
-    pub fn on_capture(&mut self, data: &CaptureData) {
-        if data.connect && self.state == ConnState::Unknown {
+    pub fn feed(&mut self, seq: u32, is_syn: bool, mut data: &[u8]) -> bool {
+        if is_syn {
+            self.next_seq = Some(seq.wrapping_add(1));
+            if data.is_empty() {
+                return false;
+            }
+        }
+        let next_seq = match self.next_seq {
+            Some(n) => n,
+            None => {
+                self.next_seq = Some(seq);
+                seq
+            }
+        };
+        let mut seq = seq;
+        let delta = next_seq.wrapping_sub(seq) as i32;
+        if delta > 0 {
+            let delta = delta as usize;
+            if delta >= data.len() {
+                return false;
+            }
+            data = &data[delta..];
+            seq = next_seq;
+        }
+        if seq == next_seq {
+            self.data.extend_from_slice(data);
+            let mut cur = next_seq.wrapping_add(data.len() as u32);
+
+            while let Some((&buf_seq, _)) = self.out_of_order.range(cur..).next() {
+                if buf_seq != cur {
+                    break;
+                }
+                let buf = self.out_of_order.remove(&buf_seq).unwrap();
+                cur = cur.wrapping_add(buf.len() as u32);
+                self.data.extend_from_slice(&buf);
+            }
+            self.next_seq = Some(cur);
+            return true;
+        } else {
+            self.out_of_order.insert(seq, data.to_vec());
+            return false;
+        }
+    }
+
+    pub fn on_capture(&mut self, ts: u64, seq: u32, is_syn: bool, data: &[u8]) {
+        if is_syn && self.state == ConnState::Unknown {
             self.state = ConnState::AwaitingStartup;
-            self.connect_ts = data.ts;
         }
         self.compact_buffer();
-        self.data.extend_from_slice(data.buf);
-
+        if !self.feed(seq, is_syn, data) {
+            return;
+        }
         if self.frame_ts.is_none() {
-            self.frame_ts = Some(data.ts);
+            self.frame_ts = Some(ts);
         }
         let frame_ts = self.frame_ts.unwrap();
 
@@ -102,7 +149,7 @@ impl FrameBuffer {
             });
         }
         if self.frame_offset < self.buf_offset + self.data.len() {
-            self.frame_ts = Some(data.ts);
+            self.frame_ts = Some(ts);
         } else {
             self.frame_ts = None;
         }

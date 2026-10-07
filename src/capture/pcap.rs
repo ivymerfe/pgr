@@ -2,11 +2,15 @@ use etherparse::{InternetSlice, SlicedPacket, TcpSlice, TransportSlice};
 use pcap_parser::{
     Block, Linktype, PcapBlockOwned, PcapError, create_reader, traits::PcapReaderIterator,
 };
-use std::{collections::HashMap, io::Read, net::SocketAddr};
+use std::{
+    collections::{HashMap, VecDeque},
+    io::Read,
+    net::SocketAddr,
+};
 
 use crate::capture::{
-    reader::{CaptureData, CaptureReader, ClientId, ReadError, ReadResult},
-    reassembler::Reassembler,
+    frame_buffer::FrameBuffer,
+    reader::{CaptureEvent, CaptureMessage, CaptureReader, ClientId, ReadError, ReadResult},
 };
 
 pub struct TsPacket<'a> {
@@ -20,11 +24,11 @@ pub struct PcapReader<'a> {
     port: u16,
     ts_offset: u64,
     max_duration: u64,
-    buffer: Vec<u8>,
-    reassemblers: HashMap<ClientId, Reassembler>,
+    buffers: HashMap<ClientId, FrameBuffer>,
     addr_map: HashMap<SocketAddr, ClientId>,
     next_id: u32,
     pub first_ts: u64,
+    messages: VecDeque<CaptureMessage>,
 
     interfaces: Vec<Linktype>,
     legacy_linktype: Option<Linktype>,
@@ -42,25 +46,17 @@ impl<'a> PcapReader<'a> {
             port,
             ts_offset,
             max_duration,
-            buffer: Vec::new(),
-            reassemblers: HashMap::new(),
+            buffers: HashMap::new(),
             addr_map: HashMap::new(),
             next_id: 0,
             first_ts: 0,
+            messages: VecDeque::new(),
             interfaces: Vec::new(),
             legacy_linktype: None,
         })
     }
-}
 
-impl From<PcapError<&[u8]>> for ReadError {
-    fn from(value: PcapError<&[u8]>) -> Self {
-        Self::Error(value.to_string())
-    }
-}
-
-impl<'a> CaptureReader for PcapReader<'a> {
-    fn next(&mut self) -> ReadResult<'_> {
+    pub fn read_pcap(&mut self) -> Result<(), ReadError> {
         loop {
             match self.pcap.next() {
                 Ok((consumed, block)) => {
@@ -121,25 +117,46 @@ impl<'a> CaptureReader for PcapReader<'a> {
                             });
 
                             let tcp = packet.tcp;
-                            let re = self.reassemblers.entry(id).or_default();
-                            self.buffer.clear();
-
-                            re.feed(
+                            if tcp.syn() {
+                                let msg = CaptureMessage {
+                                    client: id,
+                                    ts: ts_relative,
+                                    event: CaptureEvent::Connect,
+                                };
+                                self.messages.push_back(msg);
+                            }
+                            if tcp.fin() {
+                                let msg = CaptureMessage {
+                                    client: id,
+                                    ts: ts_relative,
+                                    event: CaptureEvent::Disconnect,
+                                };
+                                self.messages.push_back(msg);
+                            }
+                            let buf = self
+                                .buffers
+                                .entry(id)
+                                .or_insert_with(|| FrameBuffer::new(id));
+                            buf.on_capture(
+                                ts_relative,
                                 tcp.sequence_number(),
                                 tcp.syn(),
                                 tcp.payload(),
-                                &mut self.buffer,
                             );
-
-                            let is_connect = tcp.syn();
+                            while let Some(info) = buf.frames.pop_front() {
+                                let msg = CaptureMessage {
+                                    client: id,
+                                    ts: info.ts,
+                                    event: CaptureEvent::PqFrame {
+                                        tag: info.tag,
+                                        offset: info.offset,
+                                        frame: buf.read_frame(&info).to_vec(),
+                                    },
+                                };
+                                self.messages.push_back(msg);
+                            }
                             self.pcap.consume_noshift(consumed);
-
-                            return Ok(CaptureData {
-                                id,
-                                ts: ts_relative,
-                                connect: is_connect,
-                                buf: &self.buffer,
-                            });
+                            return Ok(());
                         }
                     }
                     self.pcap.consume_noshift(consumed);
@@ -150,6 +167,25 @@ impl<'a> CaptureReader for PcapReader<'a> {
                 }
                 Err(e) => return Err(e.into()),
             }
+        }
+    }
+}
+
+impl From<PcapError<&[u8]>> for ReadError {
+    fn from(value: PcapError<&[u8]>) -> Self {
+        Self::Error(value.to_string())
+    }
+}
+
+impl<'a> CaptureReader for PcapReader<'a> {
+    fn next(&mut self) -> ReadResult {
+        while self.messages.is_empty() {
+            self.read_pcap()?;
+        }
+        if let Some(msg) = self.messages.pop_front() {
+            Ok(msg)
+        } else {
+            Err(ReadError::Eof)
         }
     }
 }

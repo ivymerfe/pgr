@@ -2,11 +2,20 @@ use std::io;
 
 pub type ClientId = u32;
 
-pub struct CaptureData<'a> {
-    pub id: ClientId,
+pub enum CaptureEvent {
+    Connect,
+    Disconnect,
+    PqFrame {
+        tag: u8,
+        offset: usize,
+        frame: Vec<u8>,
+    },
+}
+
+pub struct CaptureMessage {
+    pub client: ClientId,
     pub ts: u64,
-    pub connect: bool,
-    pub buf: &'a [u8],
+    pub event: CaptureEvent,
 }
 
 pub enum ReadError {
@@ -14,10 +23,10 @@ pub enum ReadError {
     Error(String),
 }
 
-pub type ReadResult<'a> = Result<CaptureData<'a>, ReadError>;
+pub type ReadResult = Result<CaptureMessage, ReadError>;
 
 pub trait CaptureReader {
-    fn next(&mut self) -> ReadResult<'_>;
+    fn next(&mut self) -> ReadResult;
 }
 
 impl From<io::Error> for ReadError {

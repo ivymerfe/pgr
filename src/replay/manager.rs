@@ -5,10 +5,7 @@ use quanta::Instant;
 use tracing::{error, info};
 
 use crate::{
-    capture::{
-        frame_buffer::{ConnState, FrameBuffer},
-        reader::{CaptureReader, ClientId, ReadError},
-    },
+    capture::reader::{CaptureEvent, CaptureReader, ClientId, ReadError},
     replay::{
         client::ReplayConfig,
         r#loop::{ConnCommand, ReplayLoop},
@@ -17,17 +14,15 @@ use crate::{
 };
 
 struct ClientInfo {
-    id: ClientId,
+    _id: ClientId,
     connected: bool,
-    buf: FrameBuffer,
 }
 
 impl ClientInfo {
-    pub fn new(id: ClientId) -> Self {
+    pub fn new(_id: ClientId) -> Self {
         Self {
-            id,
+            _id,
             connected: false,
-            buf: FrameBuffer::new(id),
         }
     }
 }
@@ -71,18 +66,53 @@ impl ReplayManager {
         let start = Instant::now();
         loop {
             match reader.next() {
-                Ok(data) => {
-                    let id = data.id;
+                Ok(msg) => {
+                    let id = msg.client;
                     let client = self
                         .clients
                         .entry(id)
                         .or_insert_with(|| ClientInfo::new(id));
-                    client.buf.on_capture(&data);
-                    if !Self::forward_frames(client, &cmd_tx, &waker) {
-                        break;
+                    match msg.event {
+                        CaptureEvent::Connect => {
+                            if !Self::send_cmd(
+                                &cmd_tx,
+                                &waker,
+                                ConnCommand::Connect { id, ts: msg.ts },
+                            ) {
+                                break;
+                            }
+                            client.connected = true;
+                        }
+                        CaptureEvent::Disconnect => {
+                            self.clients.remove(&id);
+                        }
+                        CaptureEvent::PqFrame { tag, frame, .. } => {
+                            if !client.connected {
+                                if !Self::send_cmd(
+                                    &cmd_tx,
+                                    &waker,
+                                    ConnCommand::Connect { id, ts: msg.ts },
+                                ) {
+                                    break;
+                                }
+                                client.connected = true;
+                            }
+                            if !Self::send_cmd(
+                                &cmd_tx,
+                                &waker,
+                                ConnCommand::Send {
+                                    id,
+                                    ts: msg.ts,
+                                    tag,
+                                    data: frame,
+                                },
+                            ) {
+                                break;
+                            }
+                        }
                     }
                     let elapsed_us = start.elapsed().as_micros() as u64;
-                    if data.ts.saturating_sub(elapsed_us) > 1_000_000 {
+                    if msg.ts.saturating_sub(elapsed_us) > 1_000_000 {
                         sleep(Duration::from_micros(500_000));
                     }
                 }
@@ -112,58 +142,6 @@ impl ReplayManager {
         if let Err(e) = waker.wake() {
             error!("failed to wake ctl: {e}");
             return false;
-        }
-        return true;
-    }
-
-    fn forward_frames(
-        client: &mut ClientInfo,
-        cmd_tx: &Sender<ConnCommand>,
-        waker: &Arc<mio::Waker>,
-    ) -> bool {
-        let buf = &mut client.buf;
-
-        if buf.state != ConnState::Normal && buf.state != ConnState::CopyIn {
-            return true;
-        }
-        if !client.connected {
-            let ts = buf.connect_ts;
-            if !Self::send_cmd(cmd_tx, waker, ConnCommand::Connect { id: client.id, ts }) {
-                return false;
-            }
-            client.connected = true;
-        }
-        let mut ready_frame: Option<(u8, u64, Vec<u8>)> = None;
-        while let Some(info) = buf.frames.pop_front() {
-            if info.tag == 0 {
-                continue;
-            }
-            if let Some((tag, ts, data)) = ready_frame.take() {
-                let cmd = ConnCommand::Send {
-                    id: client.id,
-                    ts,
-                    tag,
-                    data,
-                    flush: false,
-                };
-                if !Self::send_cmd(cmd_tx, waker, cmd) {
-                    return false;
-                }
-            }
-            let data = buf.read_frame(&info).to_vec();
-            ready_frame = Some((info.tag, info.ts, data));
-        }
-        if let Some((tag, ts, data)) = ready_frame.take() {
-            let cmd = ConnCommand::Send {
-                id: client.id,
-                ts,
-                tag,
-                data,
-                flush: true,
-            };
-            if !Self::send_cmd(cmd_tx, waker, cmd) {
-                return false;
-            }
         }
         return true;
     }
