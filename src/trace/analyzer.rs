@@ -156,12 +156,6 @@ impl AnalyzeClient {
                         }
                     }
                 }
-                PgMsg::FunctionCall { .. } => {
-                    self.frame_index += 1;
-                }
-                PgMsg::Describe { .. } => {
-                    self.frame_index += 1;
-                }
                 _ => (),
             }
         }
