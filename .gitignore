@@ -7,3 +7,5 @@
 *.json.gz
 *.mini
 .DS_Store
+*.pr
+/analysis

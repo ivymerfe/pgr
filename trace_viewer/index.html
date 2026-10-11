@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>pgr</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div class="app-container">
+      <div class="main">
+        <div class="table-container">
+          <div class="top-bar">
+            <input
+              id="backend-url"
+              type="text"
+              class="backend-input"
+              placeholder="http://localhost:3232"
+            />
+            <button id="connect-btn" type="button" class="backend-button">
+              connect
+            </button>
+            <div id="connect-status" class="connect-status status-ok"></div>
+          </div>
+          <div id="myGrid" class="ag-theme-alpine"></div>
+        </div>
+        <div class="right-panel">
+          <div id="chartLegend" class="chart-legend">max duration (ms) per chunk</div>
+          <div id="chunkChart"></div>
+          <div id="detail" class="detail empty">
+            <div class="detail-placeholder">Choose row for details</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

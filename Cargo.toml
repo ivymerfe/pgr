@@ -4,21 +4,24 @@ version = "0.2.2"
 edition = "2024"
 
 [dependencies]
+ahash = "0.8.12"
+anyhow = "1.0.104"
+axum = "0.8.9"
 clap = { version = "4.6.4", features = ["derive"] }
+crossbeam-channel = "0.5.16"
 etherparse = "0.21.0"
+humantime = "2.4.0"
+libc = "0.2.189"
 md5 = "0.8.1"
+memmap2 = "0.9.11"
+mio = { version = "1.2.4", features = ["os-poll", "net"] }
 pcap-parser = "0.17.0"
+quanta = "0.12.6"
+serde = { version = "1.0.229", features = ["derive"] }
+socket2 = "0.6.5"
 time = { version = "0.3.54", features = ["formatting", "macros", "local-offset"] }
+tokio = { version = "1.53.2", features = ["full"] }
+tower-http = { version = "0.7.1", features = ["cors", "compression-full", "fs"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["fmt", "time"] }
 zstd = {version = "0.13.3", features = ["zstdmt"] }
-libc = "0.2.189"
-crossbeam-channel = "0.5.16"
-anyhow = "1.0.104"
-bytesize = "2.7.0"
-humantime = "2.4.0"
-quanta = "0.12.6"
-ctrlc = "3.5.2"
-socket2 = "0.6.5"
-ahash = "0.8.12"
-mio = { version = "1.2.4", features = ["os-poll", "net"] }

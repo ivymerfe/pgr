@@ -1,22 +1,25 @@
 use clap::{Parser, Subcommand};
 
-use std::env;
 use std::fs::File;
 use std::io::BufWriter;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
+use std::{env, fs};
 
 use time::{UtcOffset, macros::format_description};
 use tracing::{error, info};
 use tracing_subscriber::fmt::time::OffsetTime;
 
-use anyhow::anyhow;
+use anyhow::{Context, anyhow, bail};
 
 use crate::capture::pgr::sync_lsn;
 use crate::capture::read_capture;
 use crate::capture_desc::CaptureDesc;
 use crate::replay::client::ReplayConfig;
 use crate::replay::manager::ReplayManager;
+use crate::trace::reader::TraceReader;
+use crate::trace::writer::StorageWriter;
 use crate::utils::files;
 
 mod capture;
@@ -25,6 +28,7 @@ mod compare;
 mod dump;
 mod proto;
 mod replay;
+mod trace;
 mod utils;
 
 #[derive(Parser)]
@@ -79,6 +83,37 @@ enum Commands {
     Lsn {
         #[arg(value_parser = parse_absolute, help = "Extension capture file or directory")]
         input: PathBuf,
+    },
+    #[command(about = "Analyze trace")]
+    Analyze {
+        #[arg(short, long, help = "Capture file")]
+        capture: CaptureDesc,
+
+        #[arg(short, long, value_parser = parse_absolute, help = "Path to trace file or directory with trace files")]
+        trace: PathBuf,
+
+        #[arg(short, long, value_parser = parse_absolute, default_value = "analysis", help = "Output folder")]
+        output: PathBuf,
+
+        #[arg(long = "chunk", default_value_t = 0.05, help = "Seconds in one chunk")]
+        chunk_secs: f32,
+
+        #[arg(short, long, default_value = "127.0.0.1", help = "Viewer server addr")]
+        addr: IpAddr,
+
+        #[arg(short, long, default_value_t = 3232, help = "Viewer server port")]
+        port: u16,
+    },
+    #[command(about = "View analysis")]
+    View {
+        #[arg(value_parser = parse_absolute, default_value = "analysis", help = "Path to analysis folder")]
+        folder: PathBuf,
+
+        #[arg(short, long, default_value = "127.0.0.1", help = "Viewer server addr")]
+        addr: IpAddr,
+
+        #[arg(short, long, default_value_t = 3232, help = "Viewer server port")]
+        port: u16,
     },
 }
 
@@ -146,6 +181,28 @@ fn run_command(cli: Cli) -> anyhow::Result<()> {
             let lsn = sync_lsn(File::open(&path)?)?;
             info!("OK: {:X}/{:08X}", lsn >> 32, lsn as u32);
         }
+        Commands::Analyze {
+            capture,
+            trace,
+            output,
+            chunk_secs,
+            addr,
+            port,
+        } => {
+            let capture_reader = read_capture(&capture)?;
+            let trace_reader = TraceReader::new(find_trace(&trace)?);
+            let storage = StorageWriter::new(&output, chunk_secs)?;
+            info!("Capture: {capture}");
+            info!("Trace: {}", trace.display());
+            info!("Output dir: {}", output.display());
+            let start = Instant::now();
+            trace::analyzer::analyze(capture_reader, trace_reader, storage)?;
+            info!("Done in {:.3} ms", start.elapsed().as_millis());
+            start_server(&output, addr, port)?;
+        }
+        Commands::View { folder, addr, port } => {
+            start_server(&folder, addr, port)?;
+        }
     }
     Ok(())
 }
@@ -180,4 +237,68 @@ fn latest_capture(dir: &Path) -> anyhow::Result<PathBuf> {
     }
     best.map(|(_, p)| p)
         .ok_or_else(|| anyhow!("no .pr files in {}", dir.display()))
+}
+
+fn start_server(folder: &PathBuf, addr: IpAddr, port: u16) -> anyhow::Result<()> {
+    info!("Serve: {}", folder.display());
+    info!("At: http://{}:{}", addr, port);
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(trace::viewer::serve(folder, SocketAddr::new(addr, port)))?;
+    Ok(())
+}
+
+fn find_trace(path: &PathBuf) -> anyhow::Result<File> {
+    if path.is_file() {
+        let metadata = fs::metadata(path)
+            .with_context(|| format!("Failed to read metadata: {}", path.display()))?;
+
+        if metadata.len() == 0 {
+            bail!("Trace file is empty: {}", path.display());
+        }
+
+        return File::open(path)
+            .with_context(|| format!("Failed to open trace: {}", path.display()));
+    }
+
+    if path.is_dir() {
+        let mut latest_file: Option<(PathBuf, std::time::SystemTime)> = None;
+
+        for entry in
+            fs::read_dir(path).with_context(|| format!("Failed to read dir: {}", path.display()))?
+        {
+            let entry = entry?;
+            let entry_path = entry.path();
+
+            if entry_path.is_file()
+                && entry_path.extension().and_then(|ext| ext.to_str()) == Some("ptr")
+            {
+                let metadata = entry.metadata()?;
+                if metadata.len() == 0 {
+                    continue;
+                }
+                let modified = metadata
+                    .modified()
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+
+                if latest_file
+                    .as_ref()
+                    .map_or(true, |(_, max_time)| modified > *max_time)
+                {
+                    latest_file = Some((entry_path, modified));
+                }
+            }
+        }
+
+        if let Some((latest_path, _)) = latest_file {
+            info!("Found trace: {}", latest_path.display());
+            return File::open(&latest_path)
+                .with_context(|| format!("Failed to open trace: {}", latest_path.display()));
+        } else {
+            bail!("No non-empty .ptr files in {}", path.display());
+        }
+    }
+
+    bail!("Does not exist: {}", path.display());
 }
