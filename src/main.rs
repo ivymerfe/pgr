@@ -12,6 +12,7 @@ use tracing_subscriber::fmt::time::OffsetTime;
 
 use anyhow::anyhow;
 
+use crate::capture::pgr::PgrReader;
 use crate::capture::read_capture;
 use crate::capture_desc::CaptureDesc;
 use crate::replay::client::ReplayConfig;
@@ -22,7 +23,6 @@ mod capture;
 mod capture_desc;
 mod compare;
 mod dump;
-mod parse;
 mod proto;
 mod replay;
 mod utils;
@@ -75,13 +75,10 @@ enum Commands {
         #[arg(long, help = "File to save differences to")]
         delta: Option<PathBuf>,
     },
-    #[command(about = "Convert extension capture to mini and print WAL sync point")]
-    Parse {
-        #[arg(value_parser = parse_absolute, help = "Extension capture file")]
+    #[command(about = "Print WAL sync point of an extension capture")]
+    Lsn {
+        #[arg(value_parser = parse_absolute, help = "Extension capture file or directory")]
         input: PathBuf,
-
-        #[arg(short, long, default_value = "capture.mini", value_parser = parse_absolute, help = "Output mini path")]
-        output: PathBuf,
     },
 }
 
@@ -140,24 +137,22 @@ fn run_command(cli: Cli) -> anyhow::Result<()> {
             }
             compare::compare(src_reader, replay_reader, delta_writer)?;
         }
-        Commands::Parse { input, output } => {
+        Commands::Lsn { input } => {
             let path = if input.is_dir() {
                 latest_capture(&input)?
             } else {
                 input
             };
-            info!("Parsing {}", path.display());
-            let reader = BufReader::new(File::open(&path)?);
-            let output_file = files::try_create(&output, "mini")?;
-            let lsn = parse::parse(reader, output_file)?;
-            info!("Sync LSN {:X}/{:08X}", lsn >> 32, lsn as u32);
+            let reader = PgrReader::new(BufReader::new(File::open(&path)?), 0, u64::MAX)?;
+            let lsn = reader.lsn();
+            info!("OK: {:X}/{:08X}", lsn >> 32, lsn as u32);
         }
     }
     Ok(())
 }
 
 fn parse_absolute(s: &str) -> Result<PathBuf, String> {
-    std::fs::canonicalize(s).map_err(|e| e.to_string())
+    std::path::absolute(s).map_err(|e| e.to_string())
 }
 
 fn default_username() -> String {

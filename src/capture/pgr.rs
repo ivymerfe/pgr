@@ -1,14 +1,11 @@
-use std::{
-    collections::{HashMap, HashSet},
-    fs::File,
-    io::{self, BufReader, Read, Seek, Write},
-};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::io::{self, Read, Seek};
 
 use anyhow::anyhow;
 
-use crate::capture::{
-    mini::{MiniWriter, ReadExt, invalid},
-    reader::{CaptureEvent, CaptureMessage, ClientId},
+use crate::capture::mini::{ReadExt, invalid};
+use crate::capture::reader::{
+    CaptureEvent, CaptureMessage, CaptureReader, ClientId, ReadError, ReadResult,
 };
 
 const SESSION_INFO: u8 = 1;
@@ -207,77 +204,99 @@ fn read_inner<R: Read>(r: &mut R) -> io::Result<Option<Record>> {
     Ok(Some(Record { client, ts, body }))
 }
 
-fn emit<W: Write>(
-    w: &mut MiniWriter<W>,
-    seen: &mut HashSet<ClientId>,
-    client: ClientId,
-    ts: u64,
-    frames: impl IntoIterator<Item = Vec<u8>>,
-) -> io::Result<()> {
-    if seen.insert(client) {
-        w.write(&CaptureMessage {
-            client,
-            ts,
-            event: CaptureEvent::Connect,
-        })?;
-    }
-    for frame in frames {
-        let tag = frame[0];
-        w.write(&CaptureMessage {
-            client,
-            ts,
-            event: CaptureEvent::PqFrame {
-                tag,
-                offset: 0,
-                frame,
-            },
-        })?;
-    }
-    Ok(())
+pub struct PgrReader<R: Read + Seek> {
+    r: R,
+    sync: u64,
+    ends: HashMap<ClientId, Vec<Option<u64>>>,
+    state: HashMap<ClientId, (usize, bool)>,
+    seen: HashSet<ClientId>,
+    base: Option<u64>,
+    queue: VecDeque<CaptureMessage>,
+    ts_offset: u64,
+    max_duration: u64,
 }
 
-pub fn parse(mut r: BufReader<File>, output: File) -> anyhow::Result<u64> {
-    let mut sync = None;
-    let mut ends: HashMap<ClientId, Vec<Option<u64>>> = HashMap::new();
-    while let Some(rec) = read_record(&mut r)? {
-        match rec.body {
-            Body::TxStart => ends.entry(rec.client).or_default().push(None),
-            Body::TxEnd { lsn } => {
-                if let Some(last) = ends.get_mut(&rec.client).and_then(|v| v.last_mut()) {
-                    *last = Some(lsn);
+impl<R: Read + Seek> PgrReader<R> {
+    pub fn new(mut r: R, ts_offset: u64, max_duration: u64) -> anyhow::Result<Self> {
+        let mut sync = None;
+        let mut ends: HashMap<ClientId, Vec<Option<u64>>> = HashMap::new();
+        while let Some(rec) = read_record(&mut r)? {
+            match rec.body {
+                Body::TxStart => ends.entry(rec.client).or_default().push(None),
+                Body::TxEnd { lsn } => {
+                    if let Some(last) = ends.get_mut(&rec.client).and_then(|v| v.last_mut()) {
+                        *last = Some(lsn);
+                    }
                 }
+                Body::Lsn(l) => {
+                    sync.get_or_insert(l);
+                }
+                _ => {}
             }
-            Body::Lsn(l) => {
-                sync.get_or_insert(l);
-            }
-            _ => {}
+        }
+        let sync = sync.ok_or_else(|| anyhow!("no sync point"))?;
+        r.rewind()?;
+        Ok(Self {
+            r,
+            sync,
+            ends,
+            state: HashMap::new(),
+            seen: HashSet::new(),
+            base: None,
+            queue: VecDeque::new(),
+            ts_offset,
+            max_duration,
+        })
+    }
+
+    pub fn lsn(&self) -> u64 {
+        self.sync
+    }
+
+    fn emit(
+        &mut self,
+        client: ClientId,
+        ts: u64,
+        offset: usize,
+        frames: impl IntoIterator<Item = Vec<u8>>,
+    ) {
+        if self.seen.insert(client) {
+            self.queue.push_back(CaptureMessage {
+                client,
+                ts,
+                event: CaptureEvent::Connect,
+            });
+        }
+        for frame in frames {
+            let tag = frame[0];
+            self.queue.push_back(CaptureMessage {
+                client,
+                ts,
+                event: CaptureEvent::PqFrame { tag, offset, frame },
+            });
         }
     }
-    let sync = sync.ok_or_else(|| anyhow!("no sync point"))?;
 
-    r.rewind()?;
-    let mut w = MiniWriter::new(output)?;
-    let mut base = None;
-    let mut seen = HashSet::new();
-    let mut state: HashMap<ClientId, (usize, bool)> = HashMap::new();
-
-    while let Some(rec) = read_record(&mut r)? {
-        let ts = rec.ts.saturating_sub(*base.get_or_insert(rec.ts));
-        let st = state.entry(rec.client).or_default();
+    fn process(&mut self, rec: Record, offset: usize) {
+        let base = *self.base.get_or_insert(rec.ts);
+        let ts = rec.ts.saturating_sub(base);
+        let client = rec.client;
+        let st = self.state.entry(client).or_default();
         match rec.body {
             Body::TxStart => {
-                st.1 = ends
-                    .get(&rec.client)
+                st.1 = self
+                    .ends
+                    .get(&client)
                     .and_then(|v| v.get(st.0))
                     .copied()
                     .flatten()
-                    .is_some_and(|l| l <= sync);
+                    .is_some_and(|l| l <= self.sync);
                 st.0 += 1;
             }
             Body::TxEnd { .. } => st.1 = false,
             Body::Lsn(_) => {}
             Body::Session { gucs, prepared } => {
-                let frames = gucs
+                let frames: Vec<Vec<u8>> = gucs
                     .into_iter()
                     .map(|(n, v)| set_config_frame(&n, &v))
                     .chain(prepared.into_iter().map(|p| {
@@ -286,16 +305,38 @@ pub fn parse(mut r: BufReader<File>, output: File) -> anyhow::Result<u64> {
                         } else {
                             parse_frame(&p.name, &p.query, &p.types)
                         }
-                    }));
-                emit(&mut w, &mut seen, rec.client, ts, frames)?;
+                    }))
+                    .collect();
+                self.emit(client, ts, offset, frames);
             }
             Body::Frame(f) => {
                 if !st.1 || f[0] == b'P' {
-                    emit(&mut w, &mut seen, rec.client, ts, [f])?;
+                    self.emit(client, ts, offset, [f]);
                 }
             }
         }
     }
-    w.finish()?.flush()?;
-    Ok(sync)
+}
+
+impl<R: Read + Seek> CaptureReader for PgrReader<R> {
+    fn next(&mut self) -> ReadResult {
+        loop {
+            if let Some(msg) = self.queue.pop_front() {
+                if msg.ts < self.ts_offset {
+                    continue;
+                }
+                let ts = msg.ts - self.ts_offset;
+                if ts > self.max_duration {
+                    return Err(ReadError::Eof);
+                }
+                return Ok(CaptureMessage { ts, ..msg });
+            }
+            let offset = self.r.stream_position()? as usize;
+            match read_record(&mut self.r) {
+                Ok(Some(rec)) => self.process(rec, offset),
+                Ok(None) => return Err(ReadError::Eof),
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
 }

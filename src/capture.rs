@@ -1,7 +1,9 @@
+use std::io::BufReader;
 use std::path::{self};
 
 use crate::capture::mini::MiniReader;
 use crate::capture::pcap::PcapReader;
+use crate::capture::pgr::PgrReader;
 use crate::capture::reader::CaptureReader;
 use crate::capture_desc::CaptureDesc;
 use crate::utils::files;
@@ -11,6 +13,7 @@ use anyhow::anyhow;
 mod frame_buffer;
 pub mod mini;
 pub mod pcap;
+pub mod pgr;
 pub mod reader;
 
 pub fn read_capture(desc: &CaptureDesc) -> anyhow::Result<Box<dyn CaptureReader>> {
@@ -35,6 +38,10 @@ pub fn read_capture(desc: &CaptureDesc) -> anyhow::Result<Box<dyn CaptureReader>
     } else if ext == "mini" {
         let file = files::try_open(path)?;
         let reader = MiniReader::new(file, desc.ts_offset, desc.max_duration)?;
+        Ok(Box::new(reader))
+    } else if ext == "pr" {
+        let file = files::try_open(path)?;
+        let reader = PgrReader::new(BufReader::new(file), desc.ts_offset, desc.max_duration)?;
         Ok(Box::new(reader))
     } else {
         let abs_path = path::absolute(path)?;

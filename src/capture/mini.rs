@@ -1,6 +1,5 @@
-use std::io::{self, BufReader, Read, Write};
-
-use zstd::{Decoder, Encoder};
+use std::io::{self, BufReader, Read};
+use zstd::Decoder;
 
 use crate::capture::reader::{CaptureEvent, CaptureMessage, CaptureReader, ReadError, ReadResult};
 
@@ -47,41 +46,6 @@ pub trait ReadExt: Read + Sized {
 }
 
 impl<R: Read> ReadExt for R {}
-
-pub struct MiniWriter<W: Write> {
-    enc: Encoder<'static, W>,
-    buf: Vec<u8>,
-}
-
-impl<W: Write> MiniWriter<W> {
-    pub fn new(w: W) -> io::Result<Self> {
-        Ok(Self {
-            enc: Encoder::new(w, 3)?,
-            buf: Vec::new(),
-        })
-    }
-
-    pub fn write(&mut self, msg: &CaptureMessage) -> io::Result<()> {
-        let (kind, frame) = match &msg.event {
-            CaptureEvent::Connect => (CONNECT, None),
-            CaptureEvent::Disconnect => (DISCONNECT, None),
-            CaptureEvent::PqFrame { frame, .. } => (FRAME, Some(frame)),
-        };
-        self.buf.clear();
-        self.buf.push(kind);
-        self.buf.extend_from_slice(&msg.client.to_le_bytes());
-        self.buf.extend_from_slice(&msg.ts.to_le_bytes());
-        if let Some(f) = frame {
-            self.buf.extend_from_slice(&(f.len() as u32).to_le_bytes());
-            self.buf.extend_from_slice(f);
-        }
-        self.enc.write_all(&self.buf)
-    }
-
-    pub fn finish(self) -> io::Result<W> {
-        self.enc.finish()
-    }
-}
 
 pub struct MiniReader<R: Read> {
     dec: Decoder<'static, BufReader<R>>,
