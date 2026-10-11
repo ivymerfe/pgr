@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 
 use std::env;
 use std::fs::File;
-use std::io::{BufReader, BufWriter};
+use std::io::BufWriter;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
@@ -12,7 +12,7 @@ use tracing_subscriber::fmt::time::OffsetTime;
 
 use anyhow::anyhow;
 
-use crate::capture::pgr::PgrReader;
+use crate::capture::pgr::sync_lsn;
 use crate::capture::read_capture;
 use crate::capture_desc::CaptureDesc;
 use crate::replay::client::ReplayConfig;
@@ -143,8 +143,7 @@ fn run_command(cli: Cli) -> anyhow::Result<()> {
             } else {
                 input
             };
-            let reader = PgrReader::new(BufReader::new(File::open(&path)?), u64::MAX)?;
-            let lsn = reader.lsn();
+            let lsn = sync_lsn(File::open(&path)?)?;
             info!("OK: {:X}/{:08X}", lsn >> 32, lsn as u32);
         }
     }

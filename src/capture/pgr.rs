@@ -1,5 +1,5 @@
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::io::{self, Read, Seek};
+use std::collections::{HashMap, VecDeque};
+use std::io::{self, BufReader, Read, Seek};
 
 use anyhow::anyhow;
 
@@ -17,25 +17,62 @@ const SYNC: u8 = 6;
 const TX_START: u8 = 7;
 const LSN: u8 = 8;
 const TX_END: u8 = 9;
+const MAX_FRAME: usize = 1 << 28;
 
-struct Prepared {
-    name: Vec<u8>,
-    sql: bool,
-    query: Vec<u8>,
-    types: Vec<u32>,
+struct Src<R: Read + Seek> {
+    r: BufReader<R>,
+    pos: u64,
+}
+
+impl<R: Read + Seek> Src<R> {
+    fn new(r: R) -> Self {
+        Self {
+            r: BufReader::new(r),
+            pos: 0,
+        }
+    }
+
+    fn skip(&mut self, n: u64) -> io::Result<()> {
+        self.r.seek_relative(n as i64)?;
+        self.pos += n;
+        Ok(())
+    }
+
+    fn skip_str(&mut self) -> io::Result<()> {
+        let n = self.u32()?;
+        self.skip(n as u64)
+    }
+
+    fn rewind(&mut self) -> io::Result<()> {
+        self.r.rewind()?;
+        self.pos = 0;
+        Ok(())
+    }
+
+    fn append(&mut self, buf: &mut Vec<u8>, n: usize) -> io::Result<()> {
+        if n > MAX_FRAME {
+            return Err(invalid("record too large"));
+        }
+        let at = buf.len();
+        buf.resize(at + n, 0);
+        self.read_exact(&mut buf[at..])
+    }
+}
+
+impl<R: Read + Seek> Read for Src<R> {
+    fn read(&mut self, b: &mut [u8]) -> io::Result<usize> {
+        let n = self.r.read(b)?;
+        self.pos += n as u64;
+        Ok(n)
+    }
 }
 
 enum Body {
-    Session {
-        gucs: Vec<(Vec<u8>, Vec<u8>)>,
-        prepared: Vec<Prepared>,
-    },
+    Session(Vec<Vec<u8>>),
     Frame(Vec<u8>),
     TxStart,
-    TxEnd {
-        lsn: u64,
-    },
-    Lsn(u64),
+    TxEnd,
+    Ignore,
 }
 
 struct Record {
@@ -44,21 +81,42 @@ struct Record {
     body: Body,
 }
 
-fn str<R: Read>(r: &mut R) -> io::Result<Vec<u8>> {
-    let n = r.u32()? as usize;
-    r.vec(n)
+enum Scan {
+    TxStart,
+    TxEnd(u64),
+    Lsn(u64),
+    Other,
 }
 
-fn types<R: Read>(r: &mut R) -> io::Result<Vec<u32>> {
-    let n = r.u16()?;
-    (0..n).map(|_| r.u32()).collect()
+#[derive(Default)]
+struct Client {
+    skip: Vec<bool>,
+    next: usize,
+    skipping: bool,
+    connected: bool,
 }
 
-fn frame(tag: u8, payload: &[u8]) -> Vec<u8> {
-    let mut f = Vec::with_capacity(payload.len() + 5);
-    f.push(tag);
-    f.extend_from_slice(&((payload.len() + 4) as u32).to_be_bytes());
-    f.extend_from_slice(payload);
+fn eof_ok<T>(r: io::Result<Option<T>>) -> io::Result<Option<T>> {
+    match r {
+        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => Ok(None),
+        other => other,
+    }
+}
+
+fn blob<R: Read + Seek>(s: &mut Src<R>) -> io::Result<Vec<u8>> {
+    let n = s.u32()? as usize;
+    s.vec(n)
+}
+
+fn begin(tag: u8, cap: usize) -> Vec<u8> {
+    let mut f = Vec::with_capacity(cap + 5);
+    f.extend_from_slice(&[tag, 0, 0, 0, 0]);
+    f
+}
+
+fn end(mut f: Vec<u8>) -> Vec<u8> {
+    let n = (f.len() - 1) as u32;
+    f[1..5].copy_from_slice(&n.to_be_bytes());
     f
 }
 
@@ -67,249 +125,310 @@ fn put_cstr(out: &mut Vec<u8>, s: &[u8]) {
     out.push(0);
 }
 
-fn parse_frame(name: &[u8], query: &[u8], types: &[u32]) -> Vec<u8> {
-    let mut p = Vec::new();
-    put_cstr(&mut p, name);
-    put_cstr(&mut p, query);
-    p.extend_from_slice(&(types.len() as u16).to_be_bytes());
-    for t in types {
-        p.extend_from_slice(&t.to_be_bytes());
+fn put_quoted(out: &mut Vec<u8>, s: &[u8]) {
+    out.push(b'\'');
+    for &b in s {
+        if b == b'\'' {
+            out.push(b'\'');
+        }
+        out.push(b);
     }
-    frame(b'P', &p)
+    out.push(b'\'');
 }
 
 fn query_frame(query: &[u8]) -> Vec<u8> {
-    let mut p = Vec::new();
-    put_cstr(&mut p, query);
-    frame(b'Q', &p)
-}
-
-fn quote(s: &[u8]) -> Vec<u8> {
-    let mut o = vec![b'\''];
-    for &b in s {
-        if b == b'\'' {
-            o.push(b'\'');
-        }
-        o.push(b);
-    }
-    o.push(b'\'');
-    o
+    let mut f = begin(b'Q', query.len() + 1);
+    put_cstr(&mut f, query);
+    end(f)
 }
 
 fn set_config_frame(name: &[u8], value: &[u8]) -> Vec<u8> {
-    let mut q = b"SELECT set_config(".to_vec();
-    q.extend_from_slice(&quote(name));
-    q.push(b',');
-    q.extend_from_slice(&quote(value));
-    q.extend_from_slice(b",false)");
-    query_frame(&q)
+    let mut f = begin(b'Q', name.len() + value.len() + 32);
+    f.extend_from_slice(b"SELECT set_config(");
+    put_quoted(&mut f, name);
+    f.push(b',');
+    put_quoted(&mut f, value);
+    f.extend_from_slice(b",false)\0");
+    end(f)
 }
 
-fn read_record<R: Read>(r: &mut R) -> io::Result<Option<Record>> {
-    match read_inner(r) {
-        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => Ok(None),
-        other => other,
+fn parse_frame<R: Read + Seek>(s: &mut Src<R>, name: &[u8], query: &[u8]) -> io::Result<Vec<u8>> {
+    let n = s.u16()? as usize;
+    let mut f = begin(b'P', name.len() + query.len() + 4 + 4 * n);
+    put_cstr(&mut f, name);
+    put_cstr(&mut f, query);
+    f.extend_from_slice(&(n as u16).to_be_bytes());
+    for _ in 0..n {
+        let t = s.u32()?;
+        f.extend_from_slice(&t.to_be_bytes());
     }
+    Ok(end(f))
 }
 
-fn read_inner<R: Read>(r: &mut R) -> io::Result<Option<Record>> {
-    let mut first = [0u8; 1];
-    if r.read(&mut first)? == 0 {
+fn scan<R: Read + Seek>(s: &mut Src<R>) -> io::Result<Option<(ClientId, Scan)>> {
+    let mut k = [0u8; 1];
+    if s.read(&mut k)? == 0 {
         return Ok(None);
     }
-    let client = r.u32()?;
-    let ts = r.u64()?;
-    let body = match first[0] {
+    let client = s.u32()?;
+    s.skip(8)?;
+    let ev = match k[0] {
         SESSION_INFO => {
-            let n = r.u32()?;
-            let mut gucs = Vec::new();
-            for _ in 0..n {
-                let name = str(r)?;
-                let val = str(r)?;
-                r.u8()?;
-                gucs.push((name, val));
+            for _ in 0..s.u32()? {
+                s.skip_str()?;
+                s.skip_str()?;
+                s.skip(1)?;
             }
-            let n = r.u32()?;
-            let mut prepared = Vec::new();
-            for _ in 0..n {
-                let name = str(r)?;
-                let sql = r.u8()? != 0;
-                let query = str(r)?;
-                let types = types(r)?;
-                prepared.push(Prepared {
-                    name,
-                    sql,
-                    query,
-                    types,
-                });
+            for _ in 0..s.u32()? {
+                s.skip_str()?;
+                s.skip(1)?;
+                s.skip_str()?;
+                let n = s.u16()?;
+                s.skip(4 * n as u64)?;
             }
-            Body::Session { gucs, prepared }
+            Scan::Other
         }
         PARSE => {
-            let name = str(r)?;
-            let query = str(r)?;
-            let types = types(r)?;
-            Body::Frame(parse_frame(&name, &query, &types))
+            s.skip_str()?;
+            s.skip_str()?;
+            let n = s.u16()?;
+            s.skip(4 * n as u64)?;
+            Scan::Other
         }
-        QUERY => Body::Frame(query_frame(&str(r)?)),
+        QUERY => {
+            s.skip_str()?;
+            Scan::Other
+        }
         BIND => {
-            let portal = str(r)?;
-            let stmt = str(r)?;
-            let nrf = r.u16()?;
-            let mut rf = Vec::new();
-            for _ in 0..nrf {
-                rf.push(r.u16()?);
-            }
-            let np = r.u16()?;
-            let mut p = Vec::new();
-            put_cstr(&mut p, &portal);
-            put_cstr(&mut p, &stmt);
-            p.extend_from_slice(&0u16.to_be_bytes());
-            p.extend_from_slice(&np.to_be_bytes());
-            for _ in 0..np {
-                r.u32()?;
-                let len = r.u32()?;
-                if len == u32::MAX {
-                    p.extend_from_slice(&(-1i32).to_be_bytes());
-                } else {
-                    let v = r.vec(len as usize)?;
-                    p.extend_from_slice(&(len as i32).to_be_bytes());
-                    p.extend_from_slice(&v);
+            s.skip_str()?;
+            s.skip_str()?;
+            let n = s.u16()?;
+            s.skip(2 * n as u64)?;
+            for _ in 0..s.u16()? {
+                s.skip(4)?;
+                let len = s.u32()?;
+                if len != u32::MAX {
+                    s.skip(len as u64)?;
                 }
             }
-            p.extend_from_slice(&nrf.to_be_bytes());
-            for f in rf {
-                p.extend_from_slice(&f.to_be_bytes());
-            }
-            Body::Frame(frame(b'B', &p))
+            Scan::Other
         }
         EXECUTE => {
-            let portal = str(r)?;
-            let max = (r.u64()? as i64).clamp(0, i32::MAX as i64) as i32;
-            let mut p = Vec::new();
-            put_cstr(&mut p, &portal);
-            p.extend_from_slice(&max.to_be_bytes());
-            Body::Frame(frame(b'E', &p))
+            s.skip_str()?;
+            s.skip(8)?;
+            Scan::Other
         }
-        SYNC => Body::Frame(frame(b'S', &[])),
-        TX_START => Body::TxStart,
-        LSN => Body::Lsn(r.u64()?),
+        SYNC => Scan::Other,
+        TX_START => Scan::TxStart,
+        LSN => Scan::Lsn(s.u64()?),
         TX_END => {
-            r.u8()?;
-            r.u32()?;
-            Body::TxEnd { lsn: r.u64()? }
+            s.skip(5)?;
+            Scan::TxEnd(s.u64()?)
+        }
+        _ => return Err(invalid("unknown record type")),
+    };
+    Ok(Some((client, ev)))
+}
+
+fn read_record<R: Read + Seek>(s: &mut Src<R>) -> io::Result<Option<Record>> {
+    let mut k = [0u8; 1];
+    if s.read(&mut k)? == 0 {
+        return Ok(None);
+    }
+    let client = s.u32()?;
+    let ts = s.u64()?;
+    let body = match k[0] {
+        SESSION_INFO => {
+            let mut frames = Vec::new();
+            for _ in 0..s.u32()? {
+                let name = blob(s)?;
+                let val = blob(s)?;
+                s.skip(1)?;
+                frames.push(set_config_frame(&name, &val));
+            }
+            for _ in 0..s.u32()? {
+                let name = blob(s)?;
+                let sql = s.u8()? != 0;
+                let query = blob(s)?;
+                frames.push(if sql {
+                    let n = s.u16()?;
+                    s.skip(4 * n as u64)?;
+                    query_frame(&query)
+                } else {
+                    parse_frame(s, &name, &query)?
+                });
+            }
+            Body::Session(frames)
+        }
+        PARSE => {
+            let name = blob(s)?;
+            let query = blob(s)?;
+            Body::Frame(parse_frame(s, &name, &query)?)
+        }
+        QUERY => {
+            let n = s.u32()? as usize;
+            let mut f = begin(b'Q', n + 1);
+            s.append(&mut f, n)?;
+            f.push(0);
+            Body::Frame(end(f))
+        }
+        BIND => {
+            let portal = blob(s)?;
+            let stmt = blob(s)?;
+            let nrf = s.u16()? as usize;
+            let rf = (0..nrf).map(|_| s.u16()).collect::<io::Result<Vec<_>>>()?;
+            let np = s.u16()?;
+            let mut f = begin(b'B', portal.len() + stmt.len() + 8 + 2 * nrf);
+            put_cstr(&mut f, &portal);
+            put_cstr(&mut f, &stmt);
+            f.extend_from_slice(&0u16.to_be_bytes());
+            f.extend_from_slice(&np.to_be_bytes());
+            for _ in 0..np {
+                s.skip(4)?;
+                let len = s.u32()?;
+                if len == u32::MAX {
+                    f.extend_from_slice(&(-1i32).to_be_bytes());
+                } else {
+                    f.extend_from_slice(&len.to_be_bytes());
+                    s.append(&mut f, len as usize)?;
+                }
+            }
+            f.extend_from_slice(&(nrf as u16).to_be_bytes());
+            for x in rf {
+                f.extend_from_slice(&x.to_be_bytes());
+            }
+            Body::Frame(end(f))
+        }
+        EXECUTE => {
+            let portal = blob(s)?;
+            let max = (s.u64()? as i64).clamp(0, i32::MAX as i64) as i32;
+            let mut f = begin(b'E', portal.len() + 5);
+            put_cstr(&mut f, &portal);
+            f.extend_from_slice(&max.to_be_bytes());
+            Body::Frame(end(f))
+        }
+        SYNC => Body::Frame(end(begin(b'S', 0))),
+        TX_START => Body::TxStart,
+        LSN => {
+            s.skip(8)?;
+            Body::Ignore
+        }
+        TX_END => {
+            s.skip(13)?;
+            Body::TxEnd
         }
         _ => return Err(invalid("unknown record type")),
     };
     Ok(Some(Record { client, ts, body }))
 }
 
+fn connect(q: &mut VecDeque<CaptureMessage>, c: &mut Client, client: ClientId, ts: u64) {
+    if !c.connected {
+        c.connected = true;
+        q.push_back(CaptureMessage {
+            client,
+            ts,
+            event: CaptureEvent::Connect,
+        });
+    }
+}
+
+fn frame_msg(client: ClientId, ts: u64, offset: usize, frame: Vec<u8>) -> CaptureMessage {
+    CaptureMessage {
+        client,
+        ts,
+        event: CaptureEvent::PqFrame {
+            tag: frame[0],
+            offset,
+            frame,
+        },
+    }
+}
+
+pub fn sync_lsn<R: Read + Seek>(r: R) -> anyhow::Result<u64> {
+    let mut s = Src::new(r);
+    while let Some((_, ev)) = eof_ok(scan(&mut s))? {
+        if let Scan::Lsn(l) = ev {
+            return Ok(l);
+        }
+    }
+    Err(anyhow!("no sync point"))
+}
+
 pub struct PgrReader<R: Read + Seek> {
-    r: R,
-    sync: u64,
-    ends: HashMap<ClientId, Vec<Option<u64>>>,
-    state: HashMap<ClientId, (usize, bool)>,
-    seen: HashSet<ClientId>,
+    src: Src<R>,
+    clients: HashMap<ClientId, Client>,
     base: Option<u64>,
     queue: VecDeque<CaptureMessage>,
     max_duration: u64,
 }
 
 impl<R: Read + Seek> PgrReader<R> {
-    pub fn new(mut r: R, max_duration: u64) -> anyhow::Result<Self> {
+    pub fn new(r: R, max_duration: u64) -> anyhow::Result<Self> {
+        let mut src = Src::new(r);
         let mut sync = None;
         let mut ends: HashMap<ClientId, Vec<Option<u64>>> = HashMap::new();
-        while let Some(rec) = read_record(&mut r)? {
-            match rec.body {
-                Body::TxStart => ends.entry(rec.client).or_default().push(None),
-                Body::TxEnd { lsn } => {
-                    if let Some(last) = ends.get_mut(&rec.client).and_then(|v| v.last_mut()) {
-                        *last = Some(lsn);
+        while let Some((client, ev)) = eof_ok(scan(&mut src))? {
+            match ev {
+                Scan::TxStart => ends.entry(client).or_default().push(None),
+                Scan::TxEnd(l) => {
+                    if let Some(last) = ends.get_mut(&client).and_then(|v| v.last_mut()) {
+                        *last = Some(l);
                     }
                 }
-                Body::Lsn(l) => {
+                Scan::Lsn(l) => {
                     sync.get_or_insert(l);
                 }
-                _ => {}
+                Scan::Other => {}
             }
         }
         let sync = sync.ok_or_else(|| anyhow!("no sync point"))?;
-        r.rewind()?;
+        src.rewind()?;
+        let clients = ends
+            .into_iter()
+            .map(|(k, v)| {
+                let skip = v
+                    .into_iter()
+                    .map(|l| l.is_some_and(|l| l <= sync))
+                    .collect();
+                (
+                    k,
+                    Client {
+                        skip,
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect();
         Ok(Self {
-            r,
-            sync,
-            ends,
-            state: HashMap::new(),
-            seen: HashSet::new(),
+            src,
+            clients,
             base: None,
             queue: VecDeque::new(),
             max_duration,
         })
     }
 
-    pub fn lsn(&self) -> u64 {
-        self.sync
-    }
-
-    fn emit(
-        &mut self,
-        client: ClientId,
-        ts: u64,
-        offset: usize,
-        frames: impl IntoIterator<Item = Vec<u8>>,
-    ) {
-        if self.seen.insert(client) {
-            self.queue.push_back(CaptureMessage {
-                client,
-                ts,
-                event: CaptureEvent::Connect,
-            });
-        }
-        for frame in frames {
-            let tag = frame[0];
-            self.queue.push_back(CaptureMessage {
-                client,
-                ts,
-                event: CaptureEvent::PqFrame { tag, offset, frame },
-            });
-        }
-    }
-
     fn process(&mut self, rec: Record, offset: usize) {
-        let base = *self.base.get_or_insert(rec.ts);
-        let ts = rec.ts.saturating_sub(base);
         let client = rec.client;
-        let st = self.state.entry(client).or_default();
+        let ts = rec.ts.saturating_sub(*self.base.get_or_insert(rec.ts));
+        let c = self.clients.entry(client).or_default();
+        let q = &mut self.queue;
         match rec.body {
             Body::TxStart => {
-                st.1 = self
-                    .ends
-                    .get(&client)
-                    .and_then(|v| v.get(st.0))
-                    .copied()
-                    .flatten()
-                    .is_some_and(|l| l <= self.sync);
-                st.0 += 1;
+                c.skipping = c.skip.get(c.next).copied().unwrap_or(false);
+                c.next += 1;
             }
-            Body::TxEnd { .. } => st.1 = false,
-            Body::Lsn(_) => {}
-            Body::Session { gucs, prepared } => {
-                let frames: Vec<Vec<u8>> = gucs
-                    .into_iter()
-                    .map(|(n, v)| set_config_frame(&n, &v))
-                    .chain(prepared.into_iter().map(|p| {
-                        if p.sql {
-                            query_frame(&p.query)
-                        } else {
-                            parse_frame(&p.name, &p.query, &p.types)
-                        }
-                    }))
-                    .collect();
-                self.emit(client, ts, offset, frames);
+            Body::TxEnd => c.skipping = false,
+            Body::Ignore => {}
+            Body::Session(frames) => {
+                connect(q, c, client, ts);
+                q.extend(frames.into_iter().map(|f| frame_msg(client, ts, offset, f)));
             }
             Body::Frame(f) => {
-                if !st.1 || f[0] == b'P' {
-                    self.emit(client, ts, offset, [f]);
+                if !c.skipping || f[0] == b'P' {
+                    connect(q, c, client, ts);
+                    q.push_back(frame_msg(client, ts, offset, f));
                 }
             }
         }
@@ -323,10 +442,10 @@ impl<R: Read + Seek> CaptureReader for PgrReader<R> {
                 if msg.ts > self.max_duration {
                     return Err(ReadError::Eof);
                 }
-                return Ok(CaptureMessage { ts: msg.ts, ..msg });
+                return Ok(msg);
             }
-            let offset = self.r.stream_position()? as usize;
-            match read_record(&mut self.r) {
+            let offset = self.src.pos as usize;
+            match eof_ok(read_record(&mut self.src)) {
                 Ok(Some(rec)) => self.process(rec, offset),
                 Ok(None) => return Err(ReadError::Eof),
                 Err(e) => return Err(e.into()),
