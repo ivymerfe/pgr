@@ -6,12 +6,16 @@ project('pgr', 'c',
 fs = import('fs')
 
 sources = files(
-  'src/init.c',
   'src/capture_worker.c',
-  'src/ring.c',
-  'src/hooks.c',
-  'src/shmem.c',
   'src/capture.c',
+  'src/funcs.c',
+  'src/hooks.c',
+  'src/init.c',
+  'src/replay_id.c',
+  'src/ring.c',
+  'src/shmem.c',
+  'src/trace_worker.c',
+  'src/trace.c',
 )
 
 pg_config = find_program('pg_config', required: true)

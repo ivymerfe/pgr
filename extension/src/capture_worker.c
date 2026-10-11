@@ -69,7 +69,7 @@ PGDLLEXPORT void capture_worker_main(Datum main_arg) {
   pqsignal(SIGHUP, SignalHandlerForConfigReload);
   BackgroundWorkerUnblockSignals();
 
-  Shmem->worker_latch = &MyProc->procLatch;
+  Shmem->capture_worker_latch = &MyProc->procLatch;
 
   while (!ShutdownRequestPending) {
     uint32 current_capture_id = get_capture_id();
@@ -101,7 +101,7 @@ PGDLLEXPORT void capture_worker_main(Datum main_arg) {
   }
   write_events();
   close_capture();
-  Shmem->worker_latch = NULL;
+  Shmem->capture_worker_latch = NULL;
 }
 
 void register_capture_worker() {

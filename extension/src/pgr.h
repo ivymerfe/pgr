@@ -3,6 +3,7 @@
 #include "postgres.h"
 
 #include "access/xlogdefs.h"
+#include "libpq/libpq-be.h"
 #include "nodes/params.h"
 #include "port/atomics.h"
 #include "postgres.h"
@@ -17,18 +18,32 @@ typedef struct {
   pg_atomic_uint32 next_client_id;
   pg_atomic_uint32 start_gen;
   pg_atomic_uint32 wal_ready;
+
   slock_t lock;
   uint32 open_xacts;
   uint32 pending_xacts;
-  Latch *worker_latch;
 
+  Latch *capture_worker_latch;
   MpscRing capture_ring;
+
+  pg_atomic_uint32 trace_running;
+  pg_atomic_uint32 trace_id;
+
+  Latch *trace_worker_latch;
+  MpscRing trace_ring;
+
+  pg_atomic_uint64 commits;
+  pg_atomic_uint64 aborts;
+  pg_atomic_uint64 rollbacks;
 } SharedMemory;
 
 extern SharedMemory *Shmem;
 
 extern uint32 MyCaptureId;
 extern uint32 MyClientId;
+
+extern int32 MyReplayId;
+extern uint64 StatementIndex;
 
 enum MessageType {
   MsgTypeSessionInfo = 1,
@@ -44,13 +59,14 @@ enum MessageType {
 
 void setup_hooks();
 void shmem_init();
+
 void register_capture_worker();
+void wakeup_capture_worker();
 
 void capture_reset();
 void capture_start();
 void capture_stop();
 bool is_capture_running();
-
 uint32 get_capture_id();
 uint32 acquire_client_id();
 
@@ -69,3 +85,19 @@ void capture_lsn(XLogRecPtr lsn);
 uint32 xact_enter_shared();
 bool xact_leave_shared(uint32 gen);
 bool xact_is_pre(uint32 gen);
+
+void read_replay_client_id(Port *port);
+bool is_replay_client();
+
+void register_trace_worker();
+void wakeup_trace_worker();
+
+void trace_reset();
+void trace_start();
+void trace_stop();
+bool is_trace_running();
+uint32 get_trace_id();
+
+void send_trace_event(char event_type, uint32 duration_us);
+void trace_begin();
+void trace_end(char event_type);

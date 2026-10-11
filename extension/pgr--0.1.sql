@@ -9,3 +9,28 @@ LANGUAGE C STRICT PARALLEL SAFE;
 CREATE OR REPLACE FUNCTION capture_reset() RETURNS boolean
 AS 'MODULE_PATHNAME', 'sql_capture_reset'
 LANGUAGE C STRICT PARALLEL SAFE;
+
+CREATE OR REPLACE FUNCTION trace_start() RETURNS boolean
+AS 'MODULE_PATHNAME', 'sql_trace_start'
+LANGUAGE C STRICT PARALLEL SAFE;
+
+CREATE OR REPLACE FUNCTION trace_stop() RETURNS boolean
+AS 'MODULE_PATHNAME', 'sql_trace_stop'
+LANGUAGE C STRICT PARALLEL SAFE;
+
+CREATE OR REPLACE FUNCTION trace_reset() RETURNS boolean
+AS 'MODULE_PATHNAME', 'sql_trace_reset'
+LANGUAGE C STRICT PARALLEL SAFE;
+
+CREATE OR REPLACE FUNCTION get_replay_stats(
+    OUT commits bigint,
+    OUT rollbacks bigint,
+    OUT failed_commits bigint
+)
+AS 'MODULE_PATHNAME', 'sql_get_replay_stats'
+LANGUAGE C STRICT PARALLEL SAFE;
+
+CREATE OR REPLACE FUNCTION reset_replay_stats()
+RETURNS void
+AS 'MODULE_PATHNAME', 'sql_reset_replay_stats'
+LANGUAGE C STRICT PARALLEL SAFE;

@@ -48,9 +48,7 @@ static void cap_end() {
     ereport(WARNING, (errmsg("pgr: capture message dropped, too large")));
   } else if (CaptureBufferPos > 0) {
     ring_push(&Shmem->capture_ring, CaptureBuffer, CaptureBufferPos);
-    if (Shmem->worker_latch) {
-      SetLatch(Shmem->worker_latch);
-    }
+    wakeup_capture_worker();
   }
   CaptureBufferPos = 0;
   CaptureOverflow = false;
