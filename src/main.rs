@@ -143,7 +143,7 @@ fn run_command(cli: Cli) -> anyhow::Result<()> {
             } else {
                 input
             };
-            let reader = PgrReader::new(BufReader::new(File::open(&path)?), 0, u64::MAX)?;
+            let reader = PgrReader::new(BufReader::new(File::open(&path)?), u64::MAX)?;
             let lsn = reader.lsn();
             info!("OK: {:X}/{:08X}", lsn >> 32, lsn as u32);
         }

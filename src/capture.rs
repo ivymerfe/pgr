@@ -33,15 +33,15 @@ pub fn read_capture(desc: &CaptureDesc) -> anyhow::Result<Box<dyn CaptureReader>
     };
     if ext == "pcap" || ext == "pcapng" {
         let file = files::try_open(path)?;
-        let reader = PcapReader::new(file, desc.port, desc.ts_offset, desc.max_duration)?;
+        let reader = PcapReader::new(file, desc.port, desc.max_duration)?;
         Ok(Box::new(reader))
     } else if ext == "mini" {
         let file = files::try_open(path)?;
-        let reader = MiniReader::new(file, desc.ts_offset, desc.max_duration)?;
+        let reader = MiniReader::new(file, desc.max_duration)?;
         Ok(Box::new(reader))
     } else if ext == "pr" {
         let file = files::try_open(path)?;
-        let reader = PgrReader::new(BufReader::new(file), desc.ts_offset, desc.max_duration)?;
+        let reader = PgrReader::new(BufReader::new(file), desc.max_duration)?;
         Ok(Box::new(reader))
     } else {
         let abs_path = path::absolute(path)?;

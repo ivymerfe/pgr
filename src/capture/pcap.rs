@@ -22,7 +22,6 @@ pub struct TsPacket<'a> {
 pub struct PcapReader<'a> {
     pcap: Box<dyn PcapReaderIterator + Send + 'a>,
     port: u16,
-    ts_offset: u64,
     max_duration: u64,
     buffers: HashMap<ClientId, FrameBuffer>,
     addr_map: HashMap<SocketAddr, ClientId>,
@@ -38,13 +37,11 @@ impl<'a> PcapReader<'a> {
     pub fn new<R: Read + Send + 'a>(
         reader: R,
         port: u16,
-        ts_offset: u64,
         max_duration: u64,
     ) -> anyhow::Result<Self> {
         Ok(Self {
             pcap: create_reader(131072, reader)?,
             port,
-            ts_offset,
             max_duration,
             buffers: HashMap::new(),
             addr_map: HashMap::new(),
@@ -98,13 +95,7 @@ impl<'a> PcapReader<'a> {
                             }
 
                             let ts_abs = packet.ts.saturating_sub(self.first_ts);
-                            if ts_abs < self.ts_offset {
-                                self.pcap.consume_noshift(consumed);
-                                continue;
-                            }
-
-                            let ts_relative = ts_abs - self.ts_offset;
-                            if ts_relative > self.max_duration {
+                            if ts_abs > self.max_duration {
                                 return Err(ReadError::Eof);
                             }
 
@@ -120,7 +111,7 @@ impl<'a> PcapReader<'a> {
                             if tcp.syn() {
                                 let msg = CaptureMessage {
                                     client: id,
-                                    ts: ts_relative,
+                                    ts: ts_abs,
                                     event: CaptureEvent::Connect,
                                 };
                                 self.messages.push_back(msg);
@@ -128,7 +119,7 @@ impl<'a> PcapReader<'a> {
                             if tcp.fin() {
                                 let msg = CaptureMessage {
                                     client: id,
-                                    ts: ts_relative,
+                                    ts: ts_abs,
                                     event: CaptureEvent::Disconnect,
                                 };
                                 self.messages.push_back(msg);
@@ -138,7 +129,7 @@ impl<'a> PcapReader<'a> {
                                 .entry(id)
                                 .or_insert_with(|| FrameBuffer::new(id));
                             buf.on_capture(
-                                ts_relative,
+                                ts_abs,
                                 tcp.sequence_number(),
                                 tcp.syn(),
                                 tcp.payload(),

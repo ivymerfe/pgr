@@ -9,7 +9,6 @@ use anyhow::{Context, anyhow};
 pub struct CaptureDesc {
     pub path: PathBuf,
     pub port: u16,
-    pub ts_offset: u64,
     pub max_duration: u64,
 }
 
@@ -28,15 +27,10 @@ impl FromStr for CaptureDesc {
             None => ("", s),
         };
         let mut max_duration = u64::MAX;
-        let mut ts_offset = 0u64;
         let mut port = 5432u16;
 
         if let Some((head, dur_str)) = rest.rsplit_once('+') {
             max_duration = parse_micros(dur_str)?;
-            rest = head;
-        }
-        if let Some((head, offset_str)) = rest.rsplit_once('@') {
-            ts_offset = parse_micros(offset_str)?;
             rest = head;
         }
         if let Some((head, port_str)) = rest.rsplit_once(':') {
@@ -52,7 +46,6 @@ impl FromStr for CaptureDesc {
         Ok(CaptureDesc {
             path,
             port,
-            ts_offset,
             max_duration,
         })
     }
@@ -64,15 +57,7 @@ impl fmt::Display for CaptureDesc {
         if self.port != 5432 {
             write!(f, ":{}", self.port)?;
         }
-        let has_offset = self.ts_offset != 0;
         let has_duration = self.max_duration != u64::MAX;
-        if has_offset {
-            write!(
-                f,
-                "(@{})",
-                humantime::format_duration(Duration::from_micros(self.ts_offset))
-            )?;
-        }
         if has_duration {
             write!(
                 f,

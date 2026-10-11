@@ -49,16 +49,14 @@ impl<R: Read> ReadExt for R {}
 
 pub struct MiniReader<R: Read> {
     dec: Decoder<'static, BufReader<R>>,
-    ts_offset: u64,
     max_duration: u64,
     pos: usize,
 }
 
 impl<R: Read> MiniReader<R> {
-    pub fn new(r: R, ts_offset: u64, max_duration: u64) -> io::Result<Self> {
+    pub fn new(r: R, max_duration: u64) -> io::Result<Self> {
         Ok(Self {
             dec: Decoder::new(r)?,
-            ts_offset,
             max_duration,
             pos: 0,
         })
@@ -98,14 +96,10 @@ impl<R: Read> CaptureReader for MiniReader<R> {
                 Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Err(ReadError::Eof),
                 Err(e) => return Err(e.into()),
             };
-            if msg.ts < self.ts_offset {
-                continue;
-            }
-            let ts = msg.ts - self.ts_offset;
-            if ts > self.max_duration {
+            if msg.ts > self.max_duration {
                 return Err(ReadError::Eof);
             }
-            return Ok(CaptureMessage { ts, ..msg });
+            return Ok(CaptureMessage { ts: msg.ts, ..msg });
         }
     }
 }

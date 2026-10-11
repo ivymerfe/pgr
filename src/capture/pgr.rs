@@ -212,12 +212,11 @@ pub struct PgrReader<R: Read + Seek> {
     seen: HashSet<ClientId>,
     base: Option<u64>,
     queue: VecDeque<CaptureMessage>,
-    ts_offset: u64,
     max_duration: u64,
 }
 
 impl<R: Read + Seek> PgrReader<R> {
-    pub fn new(mut r: R, ts_offset: u64, max_duration: u64) -> anyhow::Result<Self> {
+    pub fn new(mut r: R, max_duration: u64) -> anyhow::Result<Self> {
         let mut sync = None;
         let mut ends: HashMap<ClientId, Vec<Option<u64>>> = HashMap::new();
         while let Some(rec) = read_record(&mut r)? {
@@ -244,7 +243,6 @@ impl<R: Read + Seek> PgrReader<R> {
             seen: HashSet::new(),
             base: None,
             queue: VecDeque::new(),
-            ts_offset,
             max_duration,
         })
     }
@@ -322,14 +320,10 @@ impl<R: Read + Seek> CaptureReader for PgrReader<R> {
     fn next(&mut self) -> ReadResult {
         loop {
             if let Some(msg) = self.queue.pop_front() {
-                if msg.ts < self.ts_offset {
-                    continue;
-                }
-                let ts = msg.ts - self.ts_offset;
-                if ts > self.max_duration {
+                if msg.ts > self.max_duration {
                     return Err(ReadError::Eof);
                 }
-                return Ok(CaptureMessage { ts, ..msg });
+                return Ok(CaptureMessage { ts: msg.ts, ..msg });
             }
             let offset = self.r.stream_position()? as usize;
             match read_record(&mut self.r) {
