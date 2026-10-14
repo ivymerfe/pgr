@@ -32,51 +32,41 @@ static ExecutorStart_hook_type prev_ExecutorStart = NULL;
 static ExecutorRun_hook_type prev_ExecutorRun = NULL;
 static ProcessUtility_hook_type prev_ProcessUtility = NULL;
 
-uint32 MyCaptureId = 0;
+uint32 MyCaptureGen = 0;
 uint32 MyClientId = 0;
 uint64 StatementIndex = 0;
 
 static bool TxOpen = false;
 static uint32 TxGen = 0;
-static uint32 TxStartSentId = 0;
+static uint32 TxStartSentGen = 0;
 
 static bool IsUserTransaction = false;
-
-static void check_for_capture() {
-  uint32 current_capture_id = get_capture_id();
-  if (MyCaptureId == current_capture_id) {
-    return;
-  }
-  MyCaptureId = current_capture_id;
-  MyClientId = acquire_client_id();
-  capture_session_info();
-}
-
-static void tx_track() {
-  if (TxOpen || !IsTransactionState()) {
-    return;
-  }
-  TxGen = xact_enter_shared();
-  TxOpen = true;
-  TxStartSentId = 0;
-}
 
 static bool capture_gate() {
   if (MyBackendType != B_BACKEND) {
     return false;
   }
-  tx_track();
+  if (!TxOpen && IsTransactionState()) {
+    TxGen = xact_enter_shared();
+    TxOpen = true;
+    TxStartSentGen = 0;
+  }
   if (!is_capture_running()) {
     return false;
   }
   if (TxOpen && xact_is_pre(TxGen)) {
     return false;
   }
-  check_for_capture();
+  uint32 gen = get_capture_generation();
+  if (MyCaptureGen != gen) {
+    MyCaptureGen = gen;
+    MyClientId = acquire_client_id();
+    capture_session_info();
+  }
   if (TxOpen && !pg_atomic_read_u32(&Shmem->wal_ready) &&
-      TxStartSentId != MyCaptureId) {
+      TxStartSentGen != MyCaptureGen) {
     capture_tx_start();
-    TxStartSentId = MyCaptureId;
+    TxStartSentGen = MyCaptureGen;
   }
   return true;
 }
@@ -86,12 +76,12 @@ static void tx_finish(bool committed) {
     return;
   }
   TxOpen = false;
-  bool sent = TxStartSentId != 0 && is_capture_running() &&
-              TxStartSentId == get_capture_id();
   bool last = xact_leave_shared(TxGen);
-  TxStartSentId = 0;
-  if (sent) {
-    capture_tx_end(committed);
+  if (TxStartSentGen != 0) {
+    if (is_capture_running() && TxStartSentGen == get_capture_generation()) {
+      capture_tx_end(committed);
+    }
+    TxStartSentGen = 0;
   }
   if (last) {
     XLogRecPtr lsn = GetXLogInsertRecPtr();

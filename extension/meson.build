@@ -9,6 +9,7 @@ sources = files(
   'src/capture_worker.c',
   'src/capture.c',
   'src/funcs.c',
+  'src/helpers.c',
   'src/hooks.c',
   'src/init.c',
   'src/replay_id.c',

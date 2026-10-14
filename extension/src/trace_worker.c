@@ -9,7 +9,6 @@
 #include "storage/latch.h"
 #include "storage/proc.h"
 #include "utils/elog.h"
-#include "utils/timestamp.h"
 #include "utils/wait_classes.h"
 
 #include <stdio.h>
@@ -19,7 +18,7 @@
 
 static FILE *TraceFile = NULL;
 static char TraceBuffer[BUFFER_SIZE];
-static uint32 WorkerTraceId = 0;
+static uint32 WorkerGeneration = 0;
 
 static void close_trace() {
   if (TraceFile != NULL) {
@@ -28,15 +27,12 @@ static void close_trace() {
   }
 }
 
-static bool start_trace() {
+static bool open_trace() {
   close_trace();
 
-  char dir[MAXPGPATH];
-  snprintf(dir, sizeof(dir), "%s/traces", DataDir);
-  mkdir(dir, 0700);
-
   char path[MAXPGPATH];
-  snprintf(path, sizeof(path), "%s/%ld.ptr", dir, (long)GetCurrentTimestamp());
+  snprintf(path, sizeof(path), "%s/traces/%u.ptr", DataDir,
+           pg_atomic_read_u32(&Shmem->trace_id));
 
   FILE *f = fopen(path, "w");
   if (f == NULL) {
@@ -72,13 +68,13 @@ PGDLLEXPORT void trace_worker_main(Datum main_arg) {
   Shmem->trace_worker_latch = &MyProc->procLatch;
 
   while (!ShutdownRequestPending) {
-    uint32 current_trace_id = get_trace_id();
-    if (WorkerTraceId != current_trace_id) {
-      WorkerTraceId = current_trace_id;
+    uint32 gen = get_trace_generation();
+    if (WorkerGeneration != gen || !is_trace_running()) {
+      WorkerGeneration = gen;
       close_trace();
     }
     if (is_trace_running() && TraceFile == NULL) {
-      if (!start_trace()) {
+      if (!open_trace()) {
         break;
       }
     }

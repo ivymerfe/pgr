@@ -4,10 +4,10 @@
 SharedMemory *Shmem = NULL;
 
 void shmem_init() {
-  pg_atomic_init_u32(&Shmem->capture_running, 0);
   pg_atomic_init_u32(&Shmem->capture_id, 0);
+  pg_atomic_init_u32(&Shmem->capture_running, 0);
+  pg_atomic_init_u32(&Shmem->capture_generation, 0);
   pg_atomic_init_u32(&Shmem->next_client_id, 0);
-  pg_atomic_init_u32(&Shmem->start_gen, 0);
   pg_atomic_init_u32(&Shmem->wal_ready, 0);
 
   SpinLockInit(&Shmem->lock);
@@ -17,8 +17,9 @@ void shmem_init() {
   Shmem->capture_worker_latch = NULL;
   ring_init(&Shmem->capture_ring);
 
-  pg_atomic_init_u32(&Shmem->trace_running, 0);
   pg_atomic_init_u32(&Shmem->trace_id, 0);
+  pg_atomic_init_u32(&Shmem->trace_running, 0);
+  pg_atomic_init_u32(&Shmem->trace_generation, 0);
 
   Shmem->trace_worker_latch = NULL;
   ring_init(&Shmem->trace_ring);
@@ -36,20 +37,22 @@ void wakeup_capture_worker() {
   }
 }
 
-void capture_reset() {
-  pg_atomic_fetch_add_u32(&Shmem->capture_id, 1);
-  pg_atomic_write_u32(&Shmem->next_client_id, 0);
-  wakeup_capture_worker();
-}
-
 void capture_start() {
+  uint32 id = reserve_id("captures", "pr");
+
   SpinLockAcquire(&Shmem->lock);
-  pg_atomic_write_u32(&Shmem->wal_ready, 0);
-  pg_atomic_fetch_add_u32(&Shmem->start_gen, 1);
-  Shmem->pending_xacts = Shmem->open_xacts;
+
+  pg_atomic_write_u32(&Shmem->capture_id, id);
   pg_atomic_write_u32(&Shmem->capture_running, 1);
+  pg_atomic_fetch_add_u32(&Shmem->capture_generation, 1);
+  pg_atomic_write_u32(&Shmem->next_client_id, 0);
+
+  pg_atomic_write_u32(&Shmem->wal_ready, 0);
+  Shmem->pending_xacts = Shmem->open_xacts;
+
   SpinLockRelease(&Shmem->lock);
-  capture_reset();
+
+  wakeup_capture_worker();
 }
 
 void capture_stop() {
@@ -57,14 +60,16 @@ void capture_stop() {
     return;
   }
   pg_atomic_write_u32(&Shmem->capture_running, 0);
-  capture_reset();
+  wakeup_capture_worker();
 }
 
 bool is_capture_running() {
   return pg_atomic_read_u32(&Shmem->capture_running) != 0;
 }
 
-uint32 get_capture_id() { return pg_atomic_read_u32(&Shmem->capture_id); }
+uint32 get_capture_generation() {
+  return pg_atomic_read_u32(&Shmem->capture_generation);
+}
 
 uint32 acquire_client_id() {
   return pg_atomic_fetch_add_u32(&Shmem->next_client_id, 1);
@@ -74,7 +79,8 @@ uint32 xact_enter_shared() {
   uint32 gen;
   SpinLockAcquire(&Shmem->lock);
   Shmem->open_xacts++;
-  gen = is_capture_running() ? pg_atomic_read_u32(&Shmem->start_gen) : 0;
+  gen =
+      is_capture_running() ? pg_atomic_read_u32(&Shmem->capture_generation) : 0;
   SpinLockRelease(&Shmem->lock);
   return gen;
 }
@@ -83,7 +89,8 @@ bool xact_leave_shared(uint32 gen) {
   bool last = false;
   SpinLockAcquire(&Shmem->lock);
   Shmem->open_xacts--;
-  if (is_capture_running() && gen != pg_atomic_read_u32(&Shmem->start_gen) &&
+  if (is_capture_running() &&
+      gen != pg_atomic_read_u32(&Shmem->capture_generation) &&
       Shmem->pending_xacts > 0) {
     last = --Shmem->pending_xacts == 0;
   }
@@ -92,7 +99,8 @@ bool xact_leave_shared(uint32 gen) {
 }
 
 bool xact_is_pre(uint32 gen) {
-  return is_capture_running() && gen != pg_atomic_read_u32(&Shmem->start_gen);
+  return is_capture_running() &&
+         gen != pg_atomic_read_u32(&Shmem->capture_generation);
 }
 
 // trace
@@ -103,14 +111,13 @@ void wakeup_trace_worker() {
   }
 }
 
-void trace_reset() {
-  pg_atomic_fetch_add_u32(&Shmem->trace_id, 1);
-  wakeup_trace_worker();
-}
-
 void trace_start() {
+  uint32 id = reserve_id("traces", "ptr");
+
+  pg_atomic_write_u32(&Shmem->trace_id, id);
   pg_atomic_write_u32(&Shmem->trace_running, 1);
-  trace_reset();
+  pg_atomic_fetch_add_u32(&Shmem->trace_generation, 1);
+  wakeup_trace_worker();
 }
 
 void trace_stop() {
@@ -118,11 +125,13 @@ void trace_stop() {
     return;
   }
   pg_atomic_write_u32(&Shmem->trace_running, 0);
-  trace_reset();
+  wakeup_trace_worker();
 }
 
 bool is_trace_running() {
   return pg_atomic_read_u32(&Shmem->trace_running) != 0;
 }
 
-uint32 get_trace_id() { return pg_atomic_read_u32(&Shmem->trace_id); }
+uint32 get_trace_generation() {
+  return pg_atomic_read_u32(&Shmem->trace_generation);
+}

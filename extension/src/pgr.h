@@ -13,10 +13,10 @@
 #include "ring.h"
 
 typedef struct {
-  pg_atomic_uint32 capture_running;
   pg_atomic_uint32 capture_id;
+  pg_atomic_uint32 capture_running;
+  pg_atomic_uint32 capture_generation;
   pg_atomic_uint32 next_client_id;
-  pg_atomic_uint32 start_gen;
   pg_atomic_uint32 wal_ready;
 
   slock_t lock;
@@ -26,8 +26,9 @@ typedef struct {
   Latch *capture_worker_latch;
   MpscRing capture_ring;
 
-  pg_atomic_uint32 trace_running;
   pg_atomic_uint32 trace_id;
+  pg_atomic_uint32 trace_running;
+  pg_atomic_uint32 trace_generation;
 
   Latch *trace_worker_latch;
   MpscRing trace_ring;
@@ -39,7 +40,7 @@ typedef struct {
 
 extern SharedMemory *Shmem;
 
-extern uint32 MyCaptureId;
+extern uint32 MyCaptureGen;
 extern uint32 MyClientId;
 
 extern int32 MyReplayId;
@@ -63,11 +64,12 @@ void shmem_init();
 void register_capture_worker();
 void wakeup_capture_worker();
 
-void capture_reset();
+uint32 reserve_id(const char *subdir, const char *ext);
+
 void capture_start();
 void capture_stop();
 bool is_capture_running();
-uint32 get_capture_id();
+uint32 get_capture_generation();
 uint32 acquire_client_id();
 
 void capture_session_info();
@@ -92,11 +94,10 @@ bool is_replay_client();
 void register_trace_worker();
 void wakeup_trace_worker();
 
-void trace_reset();
 void trace_start();
 void trace_stop();
 bool is_trace_running();
-uint32 get_trace_id();
+uint32 get_trace_generation();
 
 void send_trace_event(char event_type, uint32 duration_us);
 void trace_begin();

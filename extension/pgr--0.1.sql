@@ -6,10 +6,6 @@ CREATE OR REPLACE FUNCTION pgr.cstop() RETURNS boolean
 AS 'MODULE_PATHNAME', 'sql_capture_stop'
 LANGUAGE C STRICT PARALLEL SAFE;
 
-CREATE OR REPLACE FUNCTION pgr.creset() RETURNS boolean
-AS 'MODULE_PATHNAME', 'sql_capture_reset'
-LANGUAGE C STRICT PARALLEL SAFE;
-
 CREATE OR REPLACE FUNCTION pgr.tstart() RETURNS boolean
 AS 'MODULE_PATHNAME', 'sql_trace_start'
 LANGUAGE C STRICT PARALLEL SAFE;
@@ -18,21 +14,17 @@ CREATE OR REPLACE FUNCTION pgr.tstop() RETURNS boolean
 AS 'MODULE_PATHNAME', 'sql_trace_stop'
 LANGUAGE C STRICT PARALLEL SAFE;
 
-CREATE OR REPLACE FUNCTION pgr.treset() RETURNS boolean
-AS 'MODULE_PATHNAME', 'sql_trace_reset'
-LANGUAGE C STRICT PARALLEL SAFE;
-
 CREATE OR REPLACE FUNCTION pgr.getstats(
     OUT commits bigint,
     OUT rollbacks bigint,
     OUT failed_commits bigint
 )
-AS 'MODULE_PATHNAME', 'sql_get_replay_stats'
+AS 'MODULE_PATHNAME', 'sql_get_stats'
 LANGUAGE C STRICT PARALLEL SAFE;
 
 CREATE OR REPLACE FUNCTION pgr.resetstats()
 RETURNS void
-AS 'MODULE_PATHNAME', 'sql_reset_replay_stats'
+AS 'MODULE_PATHNAME', 'sql_reset_stats'
 LANGUAGE C STRICT PARALLEL SAFE;
 
 CREATE TABLE pgr.temp_backups (

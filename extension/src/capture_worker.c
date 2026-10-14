@@ -9,7 +9,6 @@
 #include "storage/latch.h"
 #include "storage/proc.h"
 #include "utils/elog.h"
-#include "utils/timestamp.h"
 #include "utils/wait_classes.h"
 
 #include <stdio.h>
@@ -19,7 +18,7 @@
 
 static FILE *CaptureFile = NULL;
 static char CaptureBuffer[BUFFER_SIZE];
-static uint32 WorkerCaptureId = 0;
+static uint32 WorkerGeneration = 0;
 
 static void close_capture() {
   if (CaptureFile != NULL) {
@@ -28,15 +27,12 @@ static void close_capture() {
   }
 }
 
-static bool start_capture() {
+static bool open_capture() {
   close_capture();
 
-  char dir[MAXPGPATH];
-  snprintf(dir, sizeof(dir), "%s/captures", DataDir);
-  mkdir(dir, 0700);
-
   char path[MAXPGPATH];
-  snprintf(path, sizeof(path), "%s/%ld.pr", dir, (long)GetCurrentTimestamp());
+  snprintf(path, sizeof(path), "%s/captures/%u.pr", DataDir,
+           pg_atomic_read_u32(&Shmem->capture_id));
 
   FILE *f = fopen(path, "w");
   if (f == NULL) {
@@ -72,13 +68,13 @@ PGDLLEXPORT void capture_worker_main(Datum main_arg) {
   Shmem->capture_worker_latch = &MyProc->procLatch;
 
   while (!ShutdownRequestPending) {
-    uint32 current_capture_id = get_capture_id();
-    if (WorkerCaptureId != current_capture_id) {
-      WorkerCaptureId = current_capture_id;
+    uint32 gen = get_capture_generation();
+    if (WorkerGeneration != gen || !is_capture_running()) {
+      WorkerGeneration = gen;
       close_capture();
     }
     if (is_capture_running() && CaptureFile == NULL) {
-      if (!start_capture()) {
+      if (!open_capture()) {
         break;
       }
     }

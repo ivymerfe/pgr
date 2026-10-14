@@ -6,14 +6,12 @@
 
 PG_FUNCTION_INFO_V1(sql_capture_start);
 PG_FUNCTION_INFO_V1(sql_capture_stop);
-PG_FUNCTION_INFO_V1(sql_capture_reset);
 
 PG_FUNCTION_INFO_V1(sql_trace_start);
 PG_FUNCTION_INFO_V1(sql_trace_stop);
-PG_FUNCTION_INFO_V1(sql_trace_reset);
 
-PG_FUNCTION_INFO_V1(sql_get_replay_stats);
-PG_FUNCTION_INFO_V1(sql_reset_replay_stats);
+PG_FUNCTION_INFO_V1(sql_get_stats);
+PG_FUNCTION_INFO_V1(sql_reset_stats);
 
 Datum sql_capture_start(PG_FUNCTION_ARGS) { 
   capture_start();
@@ -22,11 +20,6 @@ Datum sql_capture_start(PG_FUNCTION_ARGS) {
 
 Datum sql_capture_stop(PG_FUNCTION_ARGS) { 
   capture_stop();
-  PG_RETURN_BOOL(true);
-}
-
-Datum sql_capture_reset(PG_FUNCTION_ARGS) { 
-  capture_reset();
   PG_RETURN_BOOL(true);
 }
 
@@ -40,12 +33,7 @@ Datum sql_trace_stop(PG_FUNCTION_ARGS) {
   PG_RETURN_BOOL(true);
 }
 
-Datum sql_trace_reset(PG_FUNCTION_ARGS) { 
-  trace_reset();
-  PG_RETURN_BOOL(true);
-}
-
-Datum sql_get_replay_stats(PG_FUNCTION_ARGS) {
+Datum sql_get_stats(PG_FUNCTION_ARGS) {
 	TupleDesc tupdesc = (TupleDesc)fcinfo->flinfo->fn_extra;
 	if (tupdesc == NULL) {
 		MemoryContext oldcontext =
@@ -76,7 +64,7 @@ Datum sql_get_replay_stats(PG_FUNCTION_ARGS) {
 	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
 }
 
-Datum sql_reset_replay_stats(PG_FUNCTION_ARGS) {
+Datum sql_reset_stats(PG_FUNCTION_ARGS) {
 	pg_atomic_write_u64(&Shmem->commits, 0);
     pg_atomic_write_u64(&Shmem->aborts, 0);
     pg_atomic_write_u64(&Shmem->rollbacks, 0);
