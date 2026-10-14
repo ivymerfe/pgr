@@ -72,6 +72,7 @@ impl AnalyzeClient {
         writer: &mut StorageWriter,
     ) -> anyhow::Result<()> {
         if let CaptureEvent::PqFrame { frame, .. } = &data.event {
+            info!("got frame");
             let msg = match self.parser.parse(frame) {
                 Ok(msg) => msg,
                 Err(e) => {
