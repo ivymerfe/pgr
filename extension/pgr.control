@@ -1,4 +1,5 @@
 comment = 'pgr capture and replay helper'
 default_version = '0.1'
 module_pathname = '$libdir/pgr'
-relocatable = true
+relocatable = false
+schema = pgr
