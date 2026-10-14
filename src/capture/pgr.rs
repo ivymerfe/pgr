@@ -152,6 +152,14 @@ fn set_config_frame(name: &[u8], value: &[u8]) -> Vec<u8> {
     end(f)
 }
 
+fn restore_frame(name: &[u8]) -> Vec<u8> {
+    let mut f = begin(b'Q', name.len() + 32);
+    f.extend_from_slice(b"SELECT pgr.trestore(");
+    put_quoted(&mut f, name);
+    f.extend_from_slice(b")\0");
+    end(f)
+}
+
 fn parse_frame<R: Read + Seek>(s: &mut Src<R>, name: &[u8], query: &[u8]) -> io::Result<Vec<u8>> {
     let n = s.u16()? as usize;
     let mut f = begin(b'P', name.len() + query.len() + 4 + 4 * n);
@@ -179,6 +187,7 @@ fn scan<R: Read + Seek>(s: &mut Src<R>) -> io::Result<Option<(ClientId, Scan)>> 
                 s.skip_str()?;
                 s.skip(1)?;
             }
+            s.skip_str()?;
             for _ in 0..s.u32()? {
                 s.skip_str()?;
                 s.skip(1)?;
@@ -245,6 +254,10 @@ fn read_record<R: Read + Seek>(s: &mut Src<R>) -> io::Result<Option<Record>> {
                 let val = blob(s)?;
                 s.skip(1)?;
                 frames.push(set_config_frame(&name, &val));
+            }
+            let tmp = blob(s)?;
+            if !tmp.is_empty() {
+                frames.push(restore_frame(&tmp));
             }
             for _ in 0..s.u32()? {
                 let name = blob(s)?;

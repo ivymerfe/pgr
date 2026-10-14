@@ -66,6 +66,8 @@ void wakeup_capture_worker();
 
 uint32 reserve_id(const char *subdir, const char *ext);
 
+// capture
+
 void capture_start();
 void capture_stop();
 bool is_capture_running();
@@ -87,6 +89,12 @@ void capture_lsn(XLogRecPtr lsn);
 uint32 xact_enter_shared();
 bool xact_leave_shared(uint32 gen);
 bool xact_is_pre(uint32 gen);
+
+int temp_dump(const char *name);
+int temp_restore(const char *name);
+bool temp_dump_safe(const char *name);
+
+// trace
 
 void read_replay_client_id(Port *port);
 bool is_replay_client();

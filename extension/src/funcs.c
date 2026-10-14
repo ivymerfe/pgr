@@ -3,6 +3,7 @@
 #include "fmgr.h"
 #include "funcapi.h"
 #include "access/htup_details.h"
+#include "utils/builtins.h"
 
 PG_FUNCTION_INFO_V1(sql_capture_start);
 PG_FUNCTION_INFO_V1(sql_capture_stop);
@@ -12,6 +13,9 @@ PG_FUNCTION_INFO_V1(sql_trace_stop);
 
 PG_FUNCTION_INFO_V1(sql_get_stats);
 PG_FUNCTION_INFO_V1(sql_reset_stats);
+
+PG_FUNCTION_INFO_V1(sql_temp_dump);
+PG_FUNCTION_INFO_V1(sql_temp_restore);
 
 Datum sql_capture_start(PG_FUNCTION_ARGS) { 
   capture_start();
@@ -69,4 +73,14 @@ Datum sql_reset_stats(PG_FUNCTION_ARGS) {
     pg_atomic_write_u64(&Shmem->aborts, 0);
     pg_atomic_write_u64(&Shmem->rollbacks, 0);
 	PG_RETURN_VOID();
+}
+
+Datum sql_temp_dump(PG_FUNCTION_ARGS) {
+  char *name = text_to_cstring(PG_GETARG_TEXT_PP(0));
+  PG_RETURN_INT32(temp_dump(name));
+}
+
+Datum sql_temp_restore(PG_FUNCTION_ARGS) {
+  char *name = text_to_cstring(PG_GETARG_TEXT_PP(0));
+  PG_RETURN_INT32(temp_restore(name));
 }

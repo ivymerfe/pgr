@@ -93,6 +93,11 @@ static void cap_prepared(PreparedStatement *ps, void *arg) {
 }
 
 void capture_session_info() {
+  char name[64];
+  snprintf(name, sizeof(name), "capture_%u_%u",
+           pg_atomic_read_u32(&Shmem->capture_id), MyClientId);
+  bool has_tmp = temp_dump_safe(name);
+
   cap_begin(MsgTypeSessionInfo);
 
   int num_vars;
@@ -114,6 +119,8 @@ void capture_session_info() {
     guc_count++;
   }
   cap_patch_u32(guc_count_pos, guc_count);
+
+  cap_str(has_tmp ? name : "");
 
   size_t prep_count_pos = CaptureBufferPos;
   uint32_t prep_count = 0;
