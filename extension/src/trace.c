@@ -8,11 +8,12 @@ void send_trace_event(char event_type, uint32 duration_us) {
   }
   uint32 index = (uint32)StatementIndex;
   char buf[13];
-  memcpy(buf, &MyClientId, 4);
+  memcpy(buf, &MyReplayId, 4);
   memcpy(buf + 4, &index, 4);
   memcpy(buf + 8, &duration_us, 4);
   buf[12] = event_type;
   ring_push(&Shmem->trace_ring, buf, sizeof(buf));
+  wakeup_trace_worker();
 }
 
 static instr_time pgr_trace_start_it;

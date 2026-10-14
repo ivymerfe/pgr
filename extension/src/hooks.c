@@ -177,7 +177,6 @@ static void pgr_pq_msg_sync_hook() {
   if (prev_pq_msg_sync_hook) {
     prev_pq_msg_sync_hook();
   }
-  StatementIndex++;
   if (!IsTransactionState() && is_capture_running() &&
       MyCaptureGen != get_capture_generation()) {
     return;
