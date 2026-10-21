@@ -18,8 +18,8 @@ PG_FUNCTION_INFO_V1(sql_temp_dump);
 PG_FUNCTION_INFO_V1(sql_temp_restore);
 
 Datum sql_capture_start(PG_FUNCTION_ARGS) { 
-  capture_start();
-  PG_RETURN_BOOL(true);
+  uint32 id = capture_start();
+  PG_RETURN_INT32(id);
 }
 
 Datum sql_capture_stop(PG_FUNCTION_ARGS) { 
@@ -28,8 +28,8 @@ Datum sql_capture_stop(PG_FUNCTION_ARGS) {
 }
 
 Datum sql_trace_start(PG_FUNCTION_ARGS) { 
-  trace_start();
-  PG_RETURN_BOOL(true);
+  uint32 id = trace_start();
+  PG_RETURN_INT32(id);
 }
 
 Datum sql_trace_stop(PG_FUNCTION_ARGS) { 

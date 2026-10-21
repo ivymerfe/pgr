@@ -68,7 +68,7 @@ uint32 reserve_id(const char *subdir, const char *ext);
 
 // capture
 
-void capture_start();
+uint32 capture_start();
 void capture_stop();
 bool is_capture_running();
 uint32 get_capture_generation();
@@ -102,7 +102,7 @@ bool is_replay_client();
 void register_trace_worker();
 void wakeup_trace_worker();
 
-void trace_start();
+uint32 trace_start();
 void trace_stop();
 bool is_trace_running();
 uint32 get_trace_generation();

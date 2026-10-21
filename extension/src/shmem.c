@@ -37,7 +37,7 @@ void wakeup_capture_worker() {
   }
 }
 
-void capture_start() {
+uint32 capture_start() {
   uint32 id = reserve_id("captures", "pr");
 
   SpinLockAcquire(&Shmem->lock);
@@ -53,6 +53,8 @@ void capture_start() {
   SpinLockRelease(&Shmem->lock);
 
   wakeup_capture_worker();
+
+  return id;
 }
 
 void capture_stop() {
@@ -111,13 +113,15 @@ void wakeup_trace_worker() {
   }
 }
 
-void trace_start() {
+uint32 trace_start() {
   uint32 id = reserve_id("traces", "ptr");
 
   pg_atomic_write_u32(&Shmem->trace_id, id);
   pg_atomic_write_u32(&Shmem->trace_running, 1);
   pg_atomic_fetch_add_u32(&Shmem->trace_generation, 1);
   wakeup_trace_worker();
+
+  return id;
 }
 
 void trace_stop() {
