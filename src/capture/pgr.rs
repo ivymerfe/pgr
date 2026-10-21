@@ -154,7 +154,7 @@ fn set_config_frame(name: &[u8], value: &[u8]) -> Vec<u8> {
 
 fn restore_frame(name: &[u8]) -> Vec<u8> {
     let mut f = begin(b'Q', name.len() + 32);
-    f.extend_from_slice(b"SELECT pgr.trestore(");
+    f.extend_from_slice(b"SELECT pgr.ttrestore(");
     put_quoted(&mut f, name);
     f.extend_from_slice(b")\0");
     end(f)

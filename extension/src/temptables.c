@@ -90,9 +90,9 @@ int temp_dump(const char *name) {
     elog(ERROR, "pgr: SPI_connect failed");
 
   if (SPI_execute("SELECT relid, table_name, columns_ddl, post_ddl "
-                  "FROM pgr.tdescribe()",
+                  "FROM pgr.ttdescribe()",
                   true, 0) != SPI_OK_SELECT)
-    elog(ERROR, "pgr: tdescribe failed");
+    elog(ERROR, "pgr: ttdescribe failed");
 
   uint64 n = SPI_processed;
   SPITupleTable *tt = SPI_tuptable;

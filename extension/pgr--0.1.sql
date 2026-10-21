@@ -27,15 +27,15 @@ RETURNS void
 AS 'MODULE_PATHNAME', 'sql_reset_stats'
 LANGUAGE C STRICT PARALLEL SAFE;
 
-CREATE FUNCTION pgr.tdump(p_name text) RETURNS int
+CREATE FUNCTION pgr.ttdump(p_name text) RETURNS int
 AS 'MODULE_PATHNAME', 'sql_temp_dump'
 LANGUAGE C STRICT;
 
-CREATE FUNCTION pgr.trestore(p_name text) RETURNS int
+CREATE FUNCTION pgr.ttrestore(p_name text) RETURNS int
 AS 'MODULE_PATHNAME', 'sql_temp_restore'
 LANGUAGE C STRICT;
 
-CREATE FUNCTION pgr.tdescribe()
+CREATE FUNCTION pgr.ttdescribe()
 RETURNS TABLE(relid oid, table_name text, columns_ddl text, post_ddl text)
 LANGUAGE plpgsql AS $$
 DECLARE
