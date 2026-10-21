@@ -5,7 +5,7 @@ use anyhow::anyhow;
 use tracing::{error, info, warn};
 
 use crate::{
-    capture::reader::{CaptureEvent, CaptureMessage, CaptureReader, ClientId, ReadError},
+    replay::source::{Command, ClientCommand, CommandSource, ClientId, ReadError},
     proto::c2s::{PgMsg, PgMsgParser},
     trace::{
         reader::{TraceData, TraceReader},
@@ -68,10 +68,10 @@ impl AnalyzeClient {
 
     pub fn on_capture(
         &mut self,
-        data: &CaptureMessage,
+        data: &ClientCommand,
         writer: &mut StorageWriter,
     ) -> anyhow::Result<()> {
-        if let CaptureEvent::PqFrame { frame, .. } = &data.event {
+        if let Command::PqFrame { frame, .. } = &data.event {
             let msg = match self.parser.parse(frame) {
                 Ok(msg) => msg,
                 Err(e) => {
@@ -164,7 +164,7 @@ impl AnalyzeClient {
 }
 
 pub fn analyze(
-    mut capture_reader: Box<dyn CaptureReader>,
+    mut capture_reader: Box<dyn CommandSource>,
     mut trace_reader: TraceReader,
     mut writer: StorageWriter,
 ) -> anyhow::Result<()> {

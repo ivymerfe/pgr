@@ -2,7 +2,7 @@ use std::io;
 
 pub type ClientId = u32;
 
-pub enum CaptureEvent {
+pub enum Command {
     Connect,
     Disconnect,
     PqFrame {
@@ -12,10 +12,10 @@ pub enum CaptureEvent {
     },
 }
 
-pub struct CaptureMessage {
+pub struct ClientCommand {
     pub client: ClientId,
     pub ts: u64,
-    pub event: CaptureEvent,
+    pub event: Command,
 }
 
 pub enum ReadError {
@@ -23,8 +23,8 @@ pub enum ReadError {
     Error(String),
 }
 
-pub trait CaptureReader {
-    fn next(&mut self) -> Result<CaptureMessage, ReadError>;
+pub trait CommandSource {
+    fn next(&mut self) -> Result<ClientCommand, ReadError>;
 }
 
 impl From<io::Error> for ReadError {

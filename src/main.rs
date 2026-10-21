@@ -1,31 +1,33 @@
 use clap::{Parser, Subcommand};
 
+use std::env;
 use std::fs::File;
-use std::io::BufWriter;
+use std::io::{BufReader, BufWriter};
 use std::net::{IpAddr, SocketAddr};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Instant;
-use std::{env, fs};
 
 use time::{UtcOffset, macros::format_description};
 use tracing::{error, info};
 use tracing_subscriber::fmt::time::OffsetTime;
 
-use anyhow::{Context, anyhow, bail};
+use anyhow::anyhow;
 
-use crate::capture::pgr::sync_lsn;
-use crate::capture::read_capture;
 use crate::capture_desc::CaptureDesc;
+use crate::pcap::reader::PcapReader;
+use crate::pr::reader::{PgrReader, sync_lsn};
 use crate::replay::client::ReplayConfig;
 use crate::replay::manager::ReplayManager;
+use crate::replay::source::CommandSource;
 use crate::trace::reader::TraceReader;
 use crate::trace::writer::StorageWriter;
 use crate::utils::files;
 
-mod capture;
 mod capture_desc;
 mod compare;
 mod dump;
+mod pcap;
+mod pr;
 mod proto;
 mod replay;
 mod trace;
@@ -42,7 +44,7 @@ struct Cli {
 enum Commands {
     #[command(about = "Replay a capture against another database")]
     Replay {
-        #[arg(help = "Capture: path[:port]@[offset][+duration]")]
+        #[arg(help = "Capture: path[:port][+duration]")]
         input: CaptureDesc,
 
         #[arg(short, long, default_value = "127.0.0.1", help = "Target server host")]
@@ -148,21 +150,21 @@ fn run_command(cli: Cli) -> anyhow::Result<()> {
             user,
             pass,
         } => {
-            let reader = read_capture(&input)?;
+            let reader = open_capture(&input)?;
             info!("Replaying {input} -> {host}:{port} dbname={dbname} user={user}");
             let config = ReplayConfig::new(host, port, dbname, user, pass);
             let mut mgr = ReplayManager::new();
             mgr.replay(config, reader)?;
         }
         Commands::Dump { input, output } => {
-            let reader = read_capture(&input)?;
+            let reader = open_capture(&input)?;
             let output_file = files::try_create(&output, "csv")?;
             info!("Dumping {input} -> {}", output.display());
             dump::dump(reader, output_file)?;
         }
         Commands::Compare { src, replay, delta } => {
-            let src_reader = read_capture(&src)?;
-            let replay_reader = read_capture(&replay)?;
+            let src_reader = open_capture(&src)?;
+            let replay_reader = open_capture(&replay)?;
             info!("Comparing {} <-> {}", src, replay);
             let mut delta_writer = None;
             if let Some(delta) = delta {
@@ -173,12 +175,7 @@ fn run_command(cli: Cli) -> anyhow::Result<()> {
             compare::compare(src_reader, replay_reader, delta_writer)?;
         }
         Commands::Lsn { input } => {
-            let path = if input.is_dir() {
-                latest_capture(&input)?
-            } else {
-                input
-            };
-            let lsn = sync_lsn(File::open(&path)?)?;
+            let lsn = sync_lsn(File::open(&input)?)?;
             info!("OK: {:X}/{:08X}", lsn >> 32, lsn as u32);
         }
         Commands::Analyze {
@@ -189,8 +186,8 @@ fn run_command(cli: Cli) -> anyhow::Result<()> {
             addr,
             port,
         } => {
-            let capture_reader = read_capture(&capture)?;
-            let trace_reader = TraceReader::new(find_trace(&trace)?);
+            let capture_reader = open_capture(&capture)?;
+            let trace_reader = TraceReader::new(File::open(&trace)?);
             let storage = StorageWriter::new(&output, chunk_secs)?;
             info!("Capture: {capture}");
             info!("Trace: {}", trace.display());
@@ -207,36 +204,33 @@ fn run_command(cli: Cli) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn parse_absolute(s: &str) -> Result<PathBuf, String> {
-    std::path::absolute(s).map_err(|e| e.to_string())
-}
-
-fn default_username() -> String {
-    env::var("USER")
-        .or_else(|_| env::var("LOGNAME"))
-        .unwrap_or_else(|_| String::from("postgres"))
-}
-
-fn latest_capture(dir: &Path) -> anyhow::Result<PathBuf> {
-    let mut best: Option<(u64, PathBuf)> = None;
-    for entry in std::fs::read_dir(dir)? {
-        let path = entry?.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("pr") {
-            continue;
-        }
-        let Some(ts) = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .and_then(|s| s.parse::<u64>().ok())
-        else {
-            continue;
-        };
-        if best.as_ref().map_or(true, |(b, _)| ts > *b) {
-            best = Some((ts, path));
-        }
+pub fn open_capture(desc: &CaptureDesc) -> anyhow::Result<Box<dyn CommandSource>> {
+    let path = &desc.path;
+    if !path.exists() {
+        return Err(anyhow!("Capture file does not exist: {}", path.display()));
     }
-    best.map(|(_, p)| p)
-        .ok_or_else(|| anyhow!("no .pr files in {}", dir.display()))
+    let ext = match path.extension() {
+        Some(ext) => ext,
+        None => {
+            let abs_path = std::path::absolute(path)?;
+            return Err(anyhow!(
+                "Capture file has no extension: {}",
+                abs_path.display()
+            ));
+        }
+    };
+    if ext == "pcap" || ext == "pcapng" {
+        let file = files::try_open(path)?;
+        let reader = PcapReader::new(file, desc.port, desc.max_duration)?;
+        Ok(Box::new(reader))
+    } else if ext == "pr" {
+        let file = files::try_open(path)?;
+        let reader = PgrReader::new(BufReader::new(file), desc.max_duration)?;
+        Ok(Box::new(reader))
+    } else {
+        let abs_path = std::path::absolute(path)?;
+        Err(anyhow!("Unknown file type: {}", abs_path.display()))
+    }
 }
 
 fn start_server(folder: &PathBuf, addr: IpAddr, port: u16) -> anyhow::Result<()> {
@@ -249,56 +243,12 @@ fn start_server(folder: &PathBuf, addr: IpAddr, port: u16) -> anyhow::Result<()>
     Ok(())
 }
 
-fn find_trace(path: &PathBuf) -> anyhow::Result<File> {
-    if path.is_file() {
-        let metadata = fs::metadata(path)
-            .with_context(|| format!("Failed to read metadata: {}", path.display()))?;
+fn parse_absolute(s: &str) -> Result<PathBuf, String> {
+    std::path::absolute(s).map_err(|e| e.to_string())
+}
 
-        if metadata.len() == 0 {
-            bail!("Trace file is empty: {}", path.display());
-        }
-
-        return File::open(path)
-            .with_context(|| format!("Failed to open trace: {}", path.display()));
-    }
-
-    if path.is_dir() {
-        let mut latest_file: Option<(PathBuf, std::time::SystemTime)> = None;
-
-        for entry in
-            fs::read_dir(path).with_context(|| format!("Failed to read dir: {}", path.display()))?
-        {
-            let entry = entry?;
-            let entry_path = entry.path();
-
-            if entry_path.is_file()
-                && entry_path.extension().and_then(|ext| ext.to_str()) == Some("ptr")
-            {
-                let metadata = entry.metadata()?;
-                if metadata.len() == 0 {
-                    continue;
-                }
-                let modified = metadata
-                    .modified()
-                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-
-                if latest_file
-                    .as_ref()
-                    .map_or(true, |(_, max_time)| modified > *max_time)
-                {
-                    latest_file = Some((entry_path, modified));
-                }
-            }
-        }
-
-        if let Some((latest_path, _)) = latest_file {
-            info!("Found trace: {}", latest_path.display());
-            return File::open(&latest_path)
-                .with_context(|| format!("Failed to open trace: {}", latest_path.display()));
-        } else {
-            bail!("No non-empty .ptr files in {}", path.display());
-        }
-    }
-
-    bail!("Does not exist: {}", path.display());
+fn default_username() -> String {
+    env::var("USER")
+        .or_else(|_| env::var("LOGNAME"))
+        .unwrap_or_else(|_| String::from("postgres"))
 }

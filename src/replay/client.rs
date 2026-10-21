@@ -5,7 +5,7 @@ use quanta::Instant;
 use socket2::{Domain, Socket, Type};
 use tracing::{error, info, warn};
 
-use crate::capture::reader::ClientId;
+use crate::replay::source::ClientId;
 use crate::proto::{self, Authentication, BackendMessage, tags};
 use crate::replay::stats::ReplayStats;
 use crate::utils::stream::Stream;

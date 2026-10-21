@@ -6,7 +6,7 @@ use std::{
 };
 
 use crate::{
-    capture::reader::{CaptureEvent, CaptureMessage, CaptureReader, ClientId, ReadError},
+    replay::source::{Command, ClientCommand, CommandSource, ClientId, ReadError},
     proto::c2s::{PgMsg, PgMsgParser},
     utils::format::DisplayBytes,
 };
@@ -22,10 +22,10 @@ struct Side {
 }
 
 impl Side {
-    fn on_message(&mut self, msg: CaptureMessage) {
+    fn on_message(&mut self, msg: ClientCommand) {
         match msg.event {
-            CaptureEvent::Connect => self.connect_ts = msg.ts,
-            CaptureEvent::PqFrame { offset, frame, tag } => {
+            Command::Connect => self.connect_ts = msg.ts,
+            Command::PqFrame { offset, frame, tag } => {
                 if tag != 0 {
                     self.count += 1;
                     self.frames.push_back((msg.ts, offset, frame));
@@ -166,8 +166,8 @@ fn startup_client_id(frame: &[u8]) -> Option<ClientId> {
 }
 
 pub fn compare(
-    mut src_reader: Box<dyn CaptureReader>,
-    mut replay_reader: Box<dyn CaptureReader>,
+    mut src_reader: Box<dyn CommandSource>,
+    mut replay_reader: Box<dyn CommandSource>,
     mut writer: Option<BufWriter<File>>,
 ) -> anyhow::Result<()> {
     let mut sources: BTreeMap<ClientId, Source> = BTreeMap::new();
@@ -202,13 +202,13 @@ pub fn compare(
                     }
                     let replay = replays.entry(rid).or_default();
                     match &msg.event {
-                        CaptureEvent::PqFrame { tag: 0, frame, .. } => {
+                        Command::PqFrame { tag: 0, frame, .. } => {
                             if replay.src_id.is_none() {
                                 replay.src_id = startup_client_id(frame);
                             }
                             continue;
                         }
-                        CaptureEvent::PqFrame { .. } if replay.src_id.is_none() => {
+                        Command::PqFrame { .. } if replay.src_id.is_none() => {
                             info!("[{}:replay] pgr.client_id not found", rid);
                             ignored.insert(rid);
                             replays.remove(&rid);

@@ -8,10 +8,8 @@ use std::{
     net::SocketAddr,
 };
 
-use crate::capture::{
-    frame_buffer::FrameBuffer,
-    reader::{CaptureEvent, CaptureMessage, CaptureReader, ClientId, ReadError},
-};
+use crate::pcap::frame_buffer::FrameBuffer;
+use crate::replay::source::{ClientCommand, ClientId, Command, CommandSource, ReadError};
 
 pub struct TsPacket<'a> {
     pub addr: SocketAddr,
@@ -27,7 +25,7 @@ pub struct PcapReader<'a> {
     addr_map: HashMap<SocketAddr, ClientId>,
     next_id: u32,
     pub first_ts: u64,
-    messages: VecDeque<CaptureMessage>,
+    messages: VecDeque<ClientCommand>,
 
     interfaces: Vec<Linktype>,
     legacy_linktype: Option<Linktype>,
@@ -109,18 +107,18 @@ impl<'a> PcapReader<'a> {
 
                             let tcp = packet.tcp;
                             if tcp.syn() {
-                                let msg = CaptureMessage {
+                                let msg = ClientCommand {
                                     client: id,
                                     ts: ts_abs,
-                                    event: CaptureEvent::Connect,
+                                    event: Command::Connect,
                                 };
                                 self.messages.push_back(msg);
                             }
                             if tcp.fin() {
-                                let msg = CaptureMessage {
+                                let msg = ClientCommand {
                                     client: id,
                                     ts: ts_abs,
-                                    event: CaptureEvent::Disconnect,
+                                    event: Command::Disconnect,
                                 };
                                 self.messages.push_back(msg);
                             }
@@ -128,17 +126,12 @@ impl<'a> PcapReader<'a> {
                                 .buffers
                                 .entry(id)
                                 .or_insert_with(|| FrameBuffer::new(id));
-                            buf.on_capture(
-                                ts_abs,
-                                tcp.sequence_number(),
-                                tcp.syn(),
-                                tcp.payload(),
-                            );
+                            buf.on_capture(ts_abs, tcp.sequence_number(), tcp.syn(), tcp.payload());
                             while let Some(info) = buf.frames.pop_front() {
-                                let msg = CaptureMessage {
+                                let msg = ClientCommand {
                                     client: id,
                                     ts: info.ts,
-                                    event: CaptureEvent::PqFrame {
+                                    event: Command::PqFrame {
                                         tag: info.tag,
                                         offset: info.offset,
                                         frame: buf.read_frame(&info).to_vec(),
@@ -168,8 +161,8 @@ impl From<PcapError<&[u8]>> for ReadError {
     }
 }
 
-impl<'a> CaptureReader for PcapReader<'a> {
-    fn next(&mut self) -> Result<CaptureMessage, ReadError> {
+impl<'a> CommandSource for PcapReader<'a> {
+    fn next(&mut self) -> Result<ClientCommand, ReadError> {
         while self.messages.is_empty() {
             self.read_pcap()?;
         }

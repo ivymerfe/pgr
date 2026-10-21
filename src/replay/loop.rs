@@ -11,7 +11,7 @@ use quanta::Instant;
 use socket2::Socket;
 use tracing::error;
 
-use crate::capture::reader::ClientId;
+use crate::replay::source::ClientId;
 use crate::replay::client::{ClientState, NewConnection, ReplayClient, ReplayConfig};
 use crate::replay::stats::ReplayStats;
 use crate::utils::stream::Stream;

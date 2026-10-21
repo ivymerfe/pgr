@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, VecDeque};
 
-use crate::capture::reader::{ClientId};
+use crate::replay::source::ClientId;
 use tracing::warn;
 
 const CLIENT_TAGS: &[u8] = b"QPBDECfcpSHX";

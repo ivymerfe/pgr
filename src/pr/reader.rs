@@ -3,7 +3,7 @@ use std::io::{self, BufReader, Read, Seek};
 
 use anyhow::anyhow;
 
-use crate::capture::reader::{CaptureEvent, CaptureMessage, CaptureReader, ClientId, ReadError};
+use crate::replay::source::{Command, ClientCommand, CommandSource, ClientId, ReadError};
 
 const SESSION_INFO: u8 = 1;
 const PARSE: u8 = 2;
@@ -371,22 +371,22 @@ fn read_record<R: Read + Seek>(s: &mut Src<R>) -> io::Result<Option<Record>> {
     Ok(Some(Record { client, ts, body }))
 }
 
-fn connect(q: &mut VecDeque<CaptureMessage>, c: &mut Client, client: ClientId, ts: u64) {
+fn connect(q: &mut VecDeque<ClientCommand>, c: &mut Client, client: ClientId, ts: u64) {
     if !c.connected {
         c.connected = true;
-        q.push_back(CaptureMessage {
+        q.push_back(ClientCommand {
             client,
             ts,
-            event: CaptureEvent::Connect,
+            event: Command::Connect,
         });
     }
 }
 
-fn frame_msg(client: ClientId, ts: u64, offset: usize, frame: Vec<u8>) -> CaptureMessage {
-    CaptureMessage {
+fn frame_msg(client: ClientId, ts: u64, offset: usize, frame: Vec<u8>) -> ClientCommand {
+    ClientCommand {
         client,
         ts,
-        event: CaptureEvent::PqFrame {
+        event: Command::PqFrame {
             tag: frame[0],
             offset,
             frame,
@@ -408,7 +408,7 @@ pub struct PgrReader<R: Read + Seek> {
     src: Src<R>,
     clients: HashMap<ClientId, Client>,
     base: Option<u64>,
-    queue: VecDeque<CaptureMessage>,
+    queue: VecDeque<ClientCommand>,
     max_duration: u64,
 }
 
@@ -484,8 +484,8 @@ impl<R: Read + Seek> PgrReader<R> {
     }
 }
 
-impl<R: Read + Seek> CaptureReader for PgrReader<R> {
-    fn next(&mut self) -> Result<CaptureMessage, ReadError> {
+impl<R: Read + Seek> CommandSource for PgrReader<R> {
+    fn next(&mut self) -> Result<ClientCommand, ReadError> {
         loop {
             if let Some(msg) = self.queue.pop_front() {
                 if msg.ts > self.max_duration {

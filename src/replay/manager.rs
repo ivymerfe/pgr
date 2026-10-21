@@ -5,8 +5,8 @@ use quanta::Instant;
 use tracing::{error, info};
 
 use crate::{
-    capture::reader::{CaptureEvent, CaptureReader, ClientId, ReadError},
     replay::{
+        source::{Command, CommandSource, ClientId, ReadError},
         client::ReplayConfig,
         r#loop::{ConnCommand, ReplayLoop},
         stats::ReplayStats,
@@ -41,7 +41,7 @@ impl ReplayManager {
     pub fn replay(
         &mut self,
         config: ReplayConfig,
-        mut reader: Box<dyn CaptureReader>,
+        mut reader: Box<dyn CommandSource>,
     ) -> anyhow::Result<()> {
         let stats = Arc::new(ReplayStats::new());
 
@@ -73,7 +73,7 @@ impl ReplayManager {
                         .entry(id)
                         .or_insert_with(|| ClientInfo::new(id));
                     match msg.event {
-                        CaptureEvent::Connect => {
+                        Command::Connect => {
                             if !Self::send_cmd(
                                 &cmd_tx,
                                 &waker,
@@ -83,10 +83,10 @@ impl ReplayManager {
                             }
                             client.connected = true;
                         }
-                        CaptureEvent::Disconnect => {
+                        Command::Disconnect => {
                             self.clients.remove(&id);
                         }
-                        CaptureEvent::PqFrame { tag, frame, .. } => {
+                        Command::PqFrame { tag, frame, .. } => {
                             if !client.connected {
                                 if !Self::send_cmd(
                                     &cmd_tx,
