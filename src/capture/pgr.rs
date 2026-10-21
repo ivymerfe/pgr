@@ -3,10 +3,7 @@ use std::io::{self, BufReader, Read, Seek};
 
 use anyhow::anyhow;
 
-use crate::capture::mini::{ReadExt, invalid};
-use crate::capture::reader::{
-    CaptureEvent, CaptureMessage, CaptureReader, ClientId, ReadError, ReadResult,
-};
+use crate::capture::reader::{CaptureEvent, CaptureMessage, CaptureReader, ClientId, ReadError};
 
 const SESSION_INFO: u8 = 1;
 const PARSE: u8 = 2;
@@ -18,6 +15,45 @@ const TX_START: u8 = 7;
 const LSN: u8 = 8;
 const TX_END: u8 = 9;
 const MAX_FRAME: usize = 1 << 28;
+
+pub fn invalid(msg: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, msg.to_string())
+}
+
+pub trait ReadExt: Read + Sized {
+    fn vec(&mut self, n: usize) -> io::Result<Vec<u8>> {
+        if n > MAX_FRAME {
+            return Err(invalid("record too large"));
+        }
+        let mut v = vec![0; n];
+        self.read_exact(&mut v)?;
+        Ok(v)
+    }
+
+    fn array<const N: usize>(&mut self) -> io::Result<[u8; N]> {
+        let mut a = [0; N];
+        self.read_exact(&mut a)?;
+        Ok(a)
+    }
+
+    fn u8(&mut self) -> io::Result<u8> {
+        Ok(self.array::<1>()?[0])
+    }
+
+    fn u16(&mut self) -> io::Result<u16> {
+        Ok(u16::from_le_bytes(self.array()?))
+    }
+
+    fn u32(&mut self) -> io::Result<u32> {
+        Ok(u32::from_le_bytes(self.array()?))
+    }
+
+    fn u64(&mut self) -> io::Result<u64> {
+        Ok(u64::from_le_bytes(self.array()?))
+    }
+}
+
+impl<R: Read> ReadExt for R {}
 
 struct Src<R: Read + Seek> {
     r: BufReader<R>,
@@ -449,7 +485,7 @@ impl<R: Read + Seek> PgrReader<R> {
 }
 
 impl<R: Read + Seek> CaptureReader for PgrReader<R> {
-    fn next(&mut self) -> ReadResult {
+    fn next(&mut self) -> Result<CaptureMessage, ReadError> {
         loop {
             if let Some(msg) = self.queue.pop_front() {
                 if msg.ts > self.max_duration {

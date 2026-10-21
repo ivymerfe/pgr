@@ -23,10 +23,8 @@ pub enum ReadError {
     Error(String),
 }
 
-pub type ReadResult = Result<CaptureMessage, ReadError>;
-
 pub trait CaptureReader {
-    fn next(&mut self) -> ReadResult;
+    fn next(&mut self) -> Result<CaptureMessage, ReadError>;
 }
 
 impl From<io::Error> for ReadError {

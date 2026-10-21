@@ -10,7 +10,7 @@ use std::{
 
 use crate::capture::{
     frame_buffer::FrameBuffer,
-    reader::{CaptureEvent, CaptureMessage, CaptureReader, ClientId, ReadError, ReadResult},
+    reader::{CaptureEvent, CaptureMessage, CaptureReader, ClientId, ReadError},
 };
 
 pub struct TsPacket<'a> {
@@ -169,7 +169,7 @@ impl From<PcapError<&[u8]>> for ReadError {
 }
 
 impl<'a> CaptureReader for PcapReader<'a> {
-    fn next(&mut self) -> ReadResult {
+    fn next(&mut self) -> Result<CaptureMessage, ReadError> {
         while self.messages.is_empty() {
             self.read_pcap()?;
         }
