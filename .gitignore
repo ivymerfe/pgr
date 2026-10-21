@@ -1,11 +1,13 @@
 /target
 /data
-/zz_*/
+.DS_Store
 *.pcap
 *.csv
 *.lat
 *.json.gz
 *.mini
-.DS_Store
 *.pr
+*.log
+/zz_*/
 /analysis
+__pycache__
