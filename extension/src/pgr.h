@@ -2,7 +2,7 @@
 
 #include "postgres.h"
 
-#include "access/xlogdefs.h"
+#include "executor/execdesc.h"
 #include "libpq/libpq-be.h"
 #include "nodes/params.h"
 #include "port/atomics.h"
@@ -45,17 +45,18 @@ extern uint32 MyClientId;
 
 extern int32 MyReplayId;
 extern uint64 StatementIndex;
+extern bool CaptureLive;
 
-enum MessageType {
-  MsgTypeSessionInfo = 1,
-  MsgTypeParse = 2,
-  MsgTypeSimpleQuery = 3,
-  MsgTypeBind = 4,
-  MsgTypeExecute = 5,
-  MsgTypeSync = 6,
-  MsgTypeTxStart = 7,
-  MsgTypeLsn = 8,
-  MsgTypeTxEnd = 9,
+enum {
+  MsgTypeLsn = 1,
+  MsgTypeConnect,
+  MsgTypeDisconnect,
+  MsgTypeSimpleQuery,
+  MsgTypeParse,
+  MsgTypeBind,
+  MsgTypeExecute,
+  MsgTypeSync,
+  MsgTypeTxEnd,
 };
 
 void setup_hooks();
@@ -66,6 +67,17 @@ void wakeup_capture_worker();
 
 uint32 reserve_id(const char *subdir, const char *ext);
 
+// session
+
+bool session_start(const char *name);
+void session_stop(void);
+bool session_active(void);
+void session_commit(void);
+void session_tx_reset(void);
+void session_note_query(QueryDesc *qd);
+void session_note_utility(Node *n);
+int session_restore(const char *name);
+
 // capture
 
 uint32 capture_start();
@@ -74,25 +86,21 @@ bool is_capture_running();
 uint32 get_capture_generation();
 uint32 acquire_client_id();
 
-void capture_session_info();
+void capture_txbuf_reset(void);
+void capture_go_live(const char *session);
+void capture_sync_lsn(void);
+void capture_disconnect(void);
 void capture_parse(const char *stmt_name, const char *query, Oid *types, int n);
 void capture_simple_query(const char *query);
 void capture_bind(const char *portal, const char *stmt, int nrf, int16 *rf,
                   int np, ParamListInfo params);
 void capture_execute(const char *portal, long max_rows);
-void capture_sync();
-
-void capture_tx_start();
+void capture_sync(void);
 void capture_tx_end(bool committed);
-void capture_lsn(XLogRecPtr lsn);
 
 uint32 xact_enter_shared();
 bool xact_leave_shared(uint32 gen);
 bool xact_is_pre(uint32 gen);
-
-int temp_dump(const char *name);
-int temp_restore(const char *name);
-bool temp_dump_safe(const char *name);
 
 // trace
 

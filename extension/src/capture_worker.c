@@ -49,10 +49,14 @@ static int write_events() {
   uint32 len;
   while (ring_pop(&Shmem->capture_ring, CaptureBuffer, BUFFER_SIZE, &len) ==
          RingOk) {
-    if (CaptureFile != NULL) {
-      fwrite(CaptureBuffer, len, 1, CaptureFile);
-    }
     count += 1;
+    if (CaptureFile == NULL) {
+      if (CaptureBuffer[0] != MsgTypeLsn || !is_capture_running()) {
+        continue;
+      }
+      open_capture();
+    }
+    fwrite(CaptureBuffer, len, 1, CaptureFile);
   }
   if (CaptureFile != NULL) {
     fflush(CaptureFile);
@@ -72,11 +76,6 @@ PGDLLEXPORT void capture_worker_main(Datum main_arg) {
     if (WorkerGeneration != gen || !is_capture_running()) {
       WorkerGeneration = gen;
       close_capture();
-    }
-    if (is_capture_running() && CaptureFile == NULL) {
-      if (!open_capture()) {
-        break;
-      }
     }
     if (write_events() > 0) {
       pg_usleep(1000);

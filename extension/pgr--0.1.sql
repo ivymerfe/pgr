@@ -27,15 +27,15 @@ RETURNS void
 AS 'MODULE_PATHNAME', 'sql_reset_stats'
 LANGUAGE C STRICT PARALLEL SAFE;
 
-CREATE FUNCTION pgr.ttdump(p_name text) RETURNS int
-AS 'MODULE_PATHNAME', 'sql_temp_dump'
+CREATE FUNCTION pgr.sdump(p_name text) RETURNS int
+AS 'MODULE_PATHNAME', 'sql_session_dump'
 LANGUAGE C STRICT;
 
-CREATE FUNCTION pgr.ttrestore(p_name text) RETURNS int
-AS 'MODULE_PATHNAME', 'sql_temp_restore'
+CREATE FUNCTION pgr.srestore(p_name text) RETURNS int
+AS 'MODULE_PATHNAME', 'sql_session_restore'
 LANGUAGE C STRICT;
 
-CREATE FUNCTION pgr.ttdescribe()
+CREATE FUNCTION pgr.ttdescribe(p_relids oid[] DEFAULT NULL)
 RETURNS TABLE(relid oid, table_name text, columns_ddl text, post_ddl text)
 LANGUAGE plpgsql AS $$
 DECLARE
@@ -46,6 +46,7 @@ BEGIN
         FROM pg_class c
         WHERE c.relnamespace = pg_my_temp_schema()
           AND c.relkind = 'r'
+          AND (p_relids IS NULL OR c.oid = ANY(p_relids))
         ORDER BY c.relname
     LOOP
         relid := r.oid;

@@ -3,7 +3,7 @@ use std::{
     io::{self, BufReader, Read},
 };
 
-use crate::replay::source::ClientId;
+use crate::capture::ClientId;
 
 #[derive(Clone, Copy)]
 pub struct TraceData {

@@ -42,6 +42,23 @@ static uint32 TxStartSentGen = 0;
 
 static bool IsUserTransaction = false;
 
+static bool TxCaptured = false;
+static bool TxDelta = false;
+static bool ExitRegistered = false;
+static char SessionName[64];
+
+static void pgr_exit(int code, Datum arg) {
+  if (CaptureLive && Shmem && is_capture_running() &&
+      MyCaptureGen == get_capture_generation())
+    capture_disconnect();
+}
+
+static void go_live() {
+  bool ok = session_active();
+  session_stop();
+  capture_go_live(ok ? SessionName : "");
+}
+
 static bool capture_gate() {
   if (MyBackendType != B_BACKEND) {
     return false;
@@ -49,7 +66,11 @@ static bool capture_gate() {
   if (!TxOpen && IsTransactionState()) {
     TxGen = xact_enter_shared();
     TxOpen = true;
-    TxStartSentGen = 0;
+    TxCaptured = false;
+    TxDelta = false;
+    if (!CaptureLive) {
+      capture_txbuf_reset();
+    }
   }
   if (!is_capture_running()) {
     return false;
@@ -58,17 +79,40 @@ static bool capture_gate() {
     return false;
   }
   uint32 gen = get_capture_generation();
-  if (MyCaptureGen != gen) {
+ if (MyCaptureGen != gen) {
+    session_stop();
+    capture_txbuf_reset();
+    CaptureLive = false;
     MyCaptureGen = gen;
     MyClientId = acquire_client_id();
-    capture_session_info();
+    if (!ExitRegistered) {
+      before_shmem_exit(pgr_exit, 0);
+      ExitRegistered = true;
+    }
+    snprintf(SessionName, sizeof(SessionName), "c_%u_%u",
+             pg_atomic_read_u32(&Shmem->capture_id), MyClientId);
+    bool fresh = StatementIndex <= 1 && pg_atomic_read_u32(&Shmem->wal_ready);
+    if (!fresh) {
+      session_start(SessionName);
+    }
   }
-  if (TxOpen && !pg_atomic_read_u32(&Shmem->wal_ready) &&
-      TxStartSentGen != MyCaptureGen) {
-    capture_tx_start();
-    TxStartSentGen = MyCaptureGen;
+  if (!CaptureLive && pg_atomic_read_u32(&Shmem->wal_ready)) {
+    go_live();
+  }
+  if (TxOpen) {
+    TxCaptured = true;
   }
   return true;
+}
+
+static void tx_precommit() {
+  if (!TxOpen || !TxCaptured || CaptureLive || !is_capture_running() ||
+      MyCaptureGen != get_capture_generation() ||
+      pg_atomic_read_u32(&Shmem->wal_ready)) {
+    return;
+  }
+  TxDelta = true;
+  session_commit();
 }
 
 static void tx_finish(bool committed) {
@@ -77,16 +121,23 @@ static void tx_finish(bool committed) {
   }
   TxOpen = false;
   bool last = xact_leave_shared(TxGen);
-  if (TxStartSentGen != 0) {
-    if (is_capture_running() && TxStartSentGen == get_capture_generation()) {
+  if (TxCaptured && !TxDelta && is_capture_running() &&
+      MyCaptureGen == get_capture_generation()) {
+    if (!CaptureLive && pg_atomic_read_u32(&Shmem->wal_ready)) {
+      go_live();
+    }
+    if (CaptureLive) {
       capture_tx_end(committed);
     }
-    TxStartSentGen = 0;
   }
+  if (!CaptureLive) {
+    capture_txbuf_reset();
+  }
+  session_tx_reset();
+  TxCaptured = false;
+  TxDelta = false;
   if (last) {
-    XLogRecPtr lsn = GetXLogInsertRecPtr();
-    pg_atomic_write_u32(&Shmem->wal_ready, 1);
-    capture_lsn(lsn);
+    capture_sync_lsn();
   }
 }
 
@@ -95,6 +146,9 @@ static void pgr_xact_callback(XactEvent event, void *arg) {
     return;
   }
   switch (event) {
+  case XACT_EVENT_PRE_COMMIT:
+    tx_precommit();
+    break;
   case XACT_EVENT_COMMIT:
   case XACT_EVENT_PREPARE:
     tx_finish(true);

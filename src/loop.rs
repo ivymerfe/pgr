@@ -11,10 +11,9 @@ use quanta::Instant;
 use socket2::Socket;
 use tracing::error;
 
-use crate::replay::source::ClientId;
-use crate::replay::client::{ClientState, NewConnection, ReplayClient, ReplayConfig};
-use crate::replay::stats::ReplayStats;
-use crate::utils::stream::Stream;
+use crate::capture::ClientId;
+use crate::client::{ClientState, NewConnection, ReplayClient, ReplayConfig};
+use crate::utils::{ReplayStats, Stream};
 
 const WAKER_TOKEN: Token = Token(usize::MAX);
 

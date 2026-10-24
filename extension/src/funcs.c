@@ -74,13 +74,3 @@ Datum sql_reset_stats(PG_FUNCTION_ARGS) {
     pg_atomic_write_u64(&Shmem->rollbacks, 0);
 	PG_RETURN_VOID();
 }
-
-Datum sql_temp_dump(PG_FUNCTION_ARGS) {
-  char *name = text_to_cstring(PG_GETARG_TEXT_PP(0));
-  PG_RETURN_INT32(temp_dump(name));
-}
-
-Datum sql_temp_restore(PG_FUNCTION_ARGS) {
-  char *name = text_to_cstring(PG_GETARG_TEXT_PP(0));
-  PG_RETURN_INT32(temp_restore(name));
-}

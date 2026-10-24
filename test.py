@@ -100,7 +100,7 @@ def run_test():
     capture_path = f"{DATA}/captures/{capture_id}.pr"
 
     out = sh(PGR, "lsn", capture_path)
-    m = re.search(r"OK:\s*([0-9A-Fa-f]+/[0-9A-Fa-f]+)", out.stdout + out.stderr)
+    m = re.search(r"LSN:\s*([0-9A-Fa-f]+/[0-9A-Fa-f]+)", out.stdout + out.stderr)
     if not m:
         print("failed to get lsn:", out.stdout, out.stderr)
         return 2

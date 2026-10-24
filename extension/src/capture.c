@@ -2,17 +2,23 @@
 
 #include "access/xact.h"
 #include "access/xlog.h"
-#include "commands/prepare.h"
-#include "fmgr.h"
+#include "lib/stringinfo.h"
 #include "nodes/params.h"
-#include "tcop/tcopprot.h"
-#include "utils/guc_tables.h"
 #include "utils/lsyscache.h"
+#include "utils/memutils.h"
 #include "utils/timestamp.h"
+
+#define TX_BUF_LIMIT (64 * 1024 * 1024)
+
+bool CaptureLive = false;
 
 static char CaptureBuffer[1024 * 1024];
 static size_t CaptureBufferPos = 0;
 static bool CaptureOverflow = false;
+
+static StringInfoData TxBuf;
+static bool TxBufInit = false;
+static bool TxBufOverflow = false;
 
 static void cap_raw(const void *data, size_t len) {
   if (CaptureOverflow || CaptureBufferPos + len > sizeof(CaptureBuffer)) {
@@ -43,98 +49,86 @@ static void cap_begin(uint8_t type) {
   cap_u64(GetCurrentTimestamp());
 }
 
+static void ring_send(const char *data, size_t len) {
+  ring_push(&Shmem->capture_ring, data, len);
+  wakeup_capture_worker();
+}
+
+static void txbuf_add(const char *data, size_t len) {
+  if (!TxBufInit) {
+    MemoryContext old = MemoryContextSwitchTo(TopMemoryContext);
+    initStringInfo(&TxBuf);
+    MemoryContextSwitchTo(old);
+    TxBufInit = true;
+  }
+  if (TxBufOverflow)
+    return;
+  if (TxBuf.len + len + sizeof(uint32_t) > TX_BUF_LIMIT) {
+    TxBufOverflow = true;
+    return;
+  }
+  uint32_t l = (uint32_t)len;
+  appendBinaryStringInfo(&TxBuf, (char *)&l, sizeof(l));
+  appendBinaryStringInfo(&TxBuf, data, len);
+}
+
 static void cap_end() {
   if (CaptureOverflow) {
     ereport(WARNING, (errmsg("pgr: capture message dropped, too large")));
   } else if (CaptureBufferPos > 0) {
-    ring_push(&Shmem->capture_ring, CaptureBuffer, CaptureBufferPos);
-    wakeup_capture_worker();
+    if (CaptureLive)
+      ring_send(CaptureBuffer, CaptureBufferPos);
+    else
+      txbuf_add(CaptureBuffer, CaptureBufferPos);
   }
   CaptureBufferPos = 0;
   CaptureOverflow = false;
 }
 
-static void cap_patch_u32(size_t pos, uint32_t value) {
-  if (CaptureOverflow) {
+void capture_txbuf_reset() {
+  TxBufOverflow = false;
+  if (!TxBufInit)
     return;
+  if (TxBuf.maxlen > 16 * 1024 * 1024) {
+    pfree(TxBuf.data);
+    TxBufInit = false;
+  } else {
+    resetStringInfo(&TxBuf);
   }
-  memcpy(&CaptureBuffer[pos], &value, sizeof(value));
 }
 
-static bool guc_is_session_state(struct config_generic *guc) {
-  if (guc->context == PGC_INTERNAL || guc->context == PGC_POSTMASTER)
-    return false;
-  return guc->source >= PGC_S_DATABASE && guc->source != PGC_S_OVERRIDE;
-}
+void capture_go_live(const char *session) {
+  CaptureLive = true;
+  cap_begin(MsgTypeConnect);
+  cap_str(session);
+  cap_end();
 
-static void cap_plansource(const char *name, bool from_sql,
-                           CachedPlanSource *src) {
-  const char *q = src->query_string;
-  size_t len = strlen(q);
-  RawStmt *raw = src->raw_parse_tree;
-  if (raw && raw->stmt_location >= 0 && (size_t)raw->stmt_location <= len) {
-    q += raw->stmt_location;
-    len -= raw->stmt_location;
-    if (raw->stmt_len > 0 && (size_t)raw->stmt_len < len) {
-      len = raw->stmt_len;
+  if (TxBufInit && TxBufOverflow) {
+    ereport(WARNING, (errmsg("pgr: pending transaction too large, dropped")));
+  } else if (TxBufInit) {
+    size_t pos = 0;
+    while (pos < (size_t)TxBuf.len) {
+      uint32_t l;
+      memcpy(&l, TxBuf.data + pos, sizeof(l));
+      pos += sizeof(l);
+      ring_send(TxBuf.data + pos, l);
+      pos += l;
     }
   }
-  cap_str(name);
-  cap_u8(from_sql);
-  cap_bytes(q, len);
-  cap_u16(src->num_params);
-  for (int i = 0; i < src->num_params; i++)
-    cap_u32(src->param_types[i]);
+  capture_txbuf_reset();
 }
 
-static void cap_prepared(PreparedStatement *ps, void *arg) {
-  cap_plansource(ps->stmt_name, ps->from_sql, ps->plansource);
-  (*(uint32_t *)arg)++;
+void capture_sync_lsn() {
+  cap_begin(MsgTypeLsn);
+  cap_u64(GetXLogInsertRecPtr());
+  if (!CaptureOverflow)
+    ring_send(CaptureBuffer, CaptureBufferPos);
+  CaptureBufferPos = 0;
+  pg_atomic_write_u32(&Shmem->wal_ready, 1);
 }
 
-void capture_session_info() {
-  char name[64];
-  snprintf(name, sizeof(name), "capture_%u_%u",
-           pg_atomic_read_u32(&Shmem->capture_id), MyClientId);
-  bool has_tmp = temp_dump_safe(name);
-
-  cap_begin(MsgTypeSessionInfo);
-
-  int num_vars;
-  struct config_generic **gucs = get_guc_variables(&num_vars);
-
-  size_t guc_count_pos = CaptureBufferPos;
-  uint32_t guc_count = 0;
-  cap_u32(0);
-
-  for (int i = 0; i < num_vars; i++) {
-    struct config_generic *guc = gucs[i];
-    if (!guc_is_session_state(guc))
-      continue;
-
-    char *val = ShowGUCOption(guc, false);
-    cap_str(guc->name);
-    cap_str(val ? val : "");
-    cap_u8(guc->source);
-    guc_count++;
-  }
-  cap_patch_u32(guc_count_pos, guc_count);
-
-  cap_str(has_tmp ? name : "");
-
-  size_t prep_count_pos = CaptureBufferPos;
-  uint32_t prep_count = 0;
-  cap_u32(0);
-
-  CachedPlanSource *unnamed = GetUnnamedStatementSource();
-  if (unnamed) {
-    cap_plansource("", false, unnamed);
-    prep_count++;
-  }
-
-  ForEachPreparedStatement(cap_prepared, &prep_count);
-  cap_patch_u32(prep_count_pos, prep_count);
-
+void capture_disconnect() {
+  cap_begin(MsgTypeDisconnect);
   cap_end();
 }
 
@@ -195,21 +189,10 @@ void capture_sync() {
   cap_end();
 }
 
-void capture_tx_start() {
-  cap_begin(MsgTypeTxStart);
-  cap_end();
-}
-
 void capture_tx_end(bool committed) {
   cap_begin(MsgTypeTxEnd);
   cap_u8(committed);
   cap_u32(GetTopTransactionIdIfAny());
   cap_u64(GetXLogInsertRecPtr());
-  cap_end();
-}
-
-void capture_lsn(XLogRecPtr lsn) {
-  cap_begin(MsgTypeLsn);
-  cap_u64(lsn);
   cap_end();
 }

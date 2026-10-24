@@ -14,8 +14,8 @@ sources = files(
   'src/init.c',
   'src/replay_id.c',
   'src/ring.c',
+  'src/session.c',
   'src/shmem.c',
-  'src/temptables.c',
   'src/trace_worker.c',
   'src/trace.c',
 )

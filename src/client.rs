@@ -5,10 +5,9 @@ use quanta::Instant;
 use socket2::{Domain, Socket, Type};
 use tracing::{error, info, warn};
 
-use crate::replay::source::ClientId;
-use crate::proto::{self, Authentication, BackendMessage, tags};
-use crate::replay::stats::ReplayStats;
-use crate::utils::stream::Stream;
+use crate::capture::ClientId;
+use crate::proto::{self, Authentication, BackendMessage};
+use crate::utils::{Stream, ReplayStats};
 
 #[derive(Clone)]
 pub struct ReplayConfig {
@@ -164,7 +163,7 @@ impl ReplayClient {
         if self.state == ClientState::Dead {
             return;
         }
-        if tag == tags::F_TERMINATE {
+        if tag == proto::F_TERMINATE {
             self.sent_terminate = true;
         }
         if self.state == ClientState::Connecting {
@@ -205,7 +204,7 @@ impl ReplayClient {
     pub fn on_replay_end(&mut self) {
         if !self.sent_terminate {
             warn!("[{}] injecting terminate frame", self.id);
-            self.replay_frame(tags::F_TERMINATE, &proto::TERMINATE_MSG);
+            self.replay_frame(proto::F_TERMINATE, &proto::TERMINATE_MSG);
         }
     }
 
