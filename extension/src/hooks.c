@@ -38,7 +38,6 @@ uint64 StatementIndex = 0;
 
 static bool TxOpen = false;
 static uint32 TxGen = 0;
-static uint32 TxStartSentGen = 0;
 
 static bool IsUserTransaction = false;
 
@@ -126,9 +125,9 @@ static void tx_finish(bool committed) {
     if (!CaptureLive && pg_atomic_read_u32(&Shmem->wal_ready)) {
       go_live();
     }
-    if (CaptureLive) {
-      capture_tx_end(committed);
-    }
+    // if (CaptureLive) {
+    //   capture_tx_end(committed);
+    // }
   }
   if (!CaptureLive) {
     capture_txbuf_reset();
