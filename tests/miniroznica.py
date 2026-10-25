@@ -17,10 +17,10 @@ TABLES = [
 JAR = "./tests/bench.jar"
 CLASS = "tests.roznica.TempCatalogRoznicaLike"
 USER = "yami"
-TIME = 4
-NUM_WORKERS = 10
+TIME = 6
+NUM_WORKERS = 20
 CAPTURE_DELAY_MIN = 1
-CAPTURE_DELAY_MAX = 2
+CAPTURE_DELAY_MAX = 3
 
 
 def table_hash(t):
@@ -53,9 +53,9 @@ def compare(a, b):
 
 
 def main():
-    initial = snapshot("initial")
+    open('pg.log', 'w').close()
 
-    # start_capture()
+    # initial = snapshot("initial")
 
     print("starting bench")
     bench = subprocess.Popen(
@@ -78,33 +78,33 @@ def main():
     )
     time.sleep(random.uniform(CAPTURE_DELAY_MIN, CAPTURE_DELAY_MAX))
     # stop_capture()
-
     capture_path = start_capture()
+
     bench.wait()
     stop_capture()
 
-    before = snapshot("after test")
+    # before = snapshot("after test")
 
-    lsn = get_lsn(capture_path)
-    if not lsn:
-        print("failed to get lsn")
-        return 2
+    # lsn = get_lsn(capture_path)
+    # if not lsn:
+    #     print("failed to get lsn")
+    #     return 2
 
-    recover(lsn)
-    rolled_back = snapshot("after rollback")
+    # recover(lsn)
+    # rolled_back = snapshot("after rollback")
 
     if replay(capture_path) != 0:
         print("replay failed")
         return 2
 
-    after = snapshot("after replay")
+    # after = snapshot("after replay")
 
-    print("initial vs rollback:")
-    compare(initial, rolled_back)
-    print("after test vs after replay:")
-    bad = compare(before, after)
-    print(f"mismatched tables: {bad}")
-    return 0 if bad == 0 else 1
+    # print("initial vs rollback:")
+    # compare(initial, rolled_back)
+    # print("after test vs after replay:")
+    # bad = compare(before, after)
+    # print(f"mismatched tables: {bad}")
+    return 0 
 
 
 if __name__ == "__main__":

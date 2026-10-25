@@ -9,33 +9,26 @@
 #include "lib/stringinfo.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
+#include "parser/analyze.h"
 #include "parser/parse_node.h"
 #include "parser/parse_relation.h"
-#include "parser/parsetree.h"
 #include "storage/fd.h"
 #include "tcop/tcopprot.h"
 #include "tcop/utility.h"
 #include "utils/builtins.h"
 #include "utils/guc_tables.h"
-#include "utils/lsyscache.h"
-#include "utils/memutils.h"
 #include "utils/plancache.h"
 #include "utils/snapmgr.h"
 
 #define SQL_ALL                                                                \
   "SELECT relid, table_name, columns_ddl, post_ddl FROM pgr.ttdescribe()"
 
-enum { SessGucs = 1, SessPrepared, SessTable, SessDropAll };
+enum { SessGucs = 1, SessPrepared, SessTable };
 
 static FILE *SessionFile = NULL;
 static char SessionPath[MAXPGPATH];
 static FILE *ReadFile = NULL;
 static uint64 ReadLeft = 0;
-static StringInfoData LastGucs;
-static StringInfoData LastPrep;
-static bool LastInit = false;
-static bool SchemaDirty = false;
-static List *DirtyRels = NIL;
 
 PG_FUNCTION_INFO_V1(sql_session_dump);
 PG_FUNCTION_INFO_V1(sql_session_restore);
@@ -157,22 +150,14 @@ static void build_prepared(StringInfo b) {
   memcpy(b->data + pos, &c.n, sizeof(c.n));
 }
 
-static void put_section(uint8 type, StringInfo cur, StringInfo last) {
-  if (cur->len == last->len && memcmp(cur->data, last->data, cur->len) == 0)
-    return;
-  put_rec(type, cur);
-  resetStringInfo(last);
-  appendBinaryStringInfo(last, cur->data, cur->len);
-}
-
 static void write_state(void) {
   StringInfoData cur;
   initStringInfo(&cur);
   build_gucs(&cur);
-  put_section(SessGucs, &cur, &LastGucs);
+  put_rec(SessGucs, &cur);
   resetStringInfo(&cur);
   build_prepared(&cur);
-  put_section(SessPrepared, &cur, &LastPrep);
+  put_rec(SessPrepared, &cur);
   pfree(cur.data);
 }
 
@@ -223,35 +208,9 @@ static void dump_tables(const char *sql) {
   SPI_finish();
 }
 
-static void write_table_delta(void) {
-  if (SchemaDirty) {
-    put_rec(SessDropAll, NULL);
-    dump_tables(SQL_ALL);
-  } else if (DirtyRels != NIL) {
-    StringInfoData sql;
-    bool first = true;
-    initStringInfo(&sql);
-    appendStringInfoString(&sql,
-                           "SELECT relid, table_name, columns_ddl, post_ddl "
-                           "FROM pgr.ttdescribe(ARRAY[");
-    foreach_oid(o, DirtyRels) {
-      appendStringInfo(&sql, "%s%u", first ? "" : ",", o);
-      first = false;
-    }
-    appendStringInfoString(&sql, "]::oid[])");
-    dump_tables(sql.data);
-    pfree(sql.data);
-  }
-}
-
 static void start_body(void) {
   write_state();
   dump_tables(SQL_ALL);
-}
-
-static void commit_body(void) {
-  write_state();
-  write_table_delta();
 }
 
 static bool guarded(void (*fn)(void)) {
@@ -286,12 +245,6 @@ static bool guarded(void (*fn)(void)) {
   return ok;
 }
 
-void session_tx_reset(void) {
-  list_free(DirtyRels);
-  DirtyRels = NIL;
-  SchemaDirty = false;
-}
-
 bool session_active(void) { return SessionFile != NULL; }
 
 void session_stop(void) {
@@ -299,7 +252,6 @@ void session_stop(void) {
     fclose(SessionFile);
     SessionFile = NULL;
   }
-  session_tx_reset();
 }
 
 static void session_abandon(void) {
@@ -322,71 +274,11 @@ bool session_start(const char *name) {
     ereport(WARNING, (errmsg("pgr: cannot create %s", SessionPath)));
     return false;
   }
-
-  if (!LastInit) {
-    MemoryContext old = MemoryContextSwitchTo(TopMemoryContext);
-    initStringInfo(&LastGucs);
-    initStringInfo(&LastPrep);
-    MemoryContextSwitchTo(old);
-    LastInit = true;
-  } else {
-    resetStringInfo(&LastGucs);
-    resetStringInfo(&LastPrep);
-  }
-
   if (!guarded(start_body)) {
     session_abandon();
     return false;
   }
   return true;
-}
-
-void session_commit(void) {
-  if (SessionFile == NULL)
-    return;
-  if (!guarded(commit_body))
-    session_abandon();
-  session_tx_reset();
-}
-
-void session_note_query(QueryDesc *qd) {
-  if (SessionFile == NULL)
-    return;
-  PlannedStmt *ps = qd->plannedstmt;
-  int rti = -1;
-  while ((rti = bms_next_member(ps->resultRelationRelids, rti)) >= 0) {
-    RangeTblEntry *rte = rt_fetch(rti, ps->rtable);
-    if (rte->rtekind != RTE_RELATION)
-      continue;
-    if (get_rel_persistence(rte->relid) == RELPERSISTENCE_TEMP) {
-      MemoryContext old = MemoryContextSwitchTo(TopMemoryContext);
-      DirtyRels = list_append_unique_oid(DirtyRels, rte->relid);
-      MemoryContextSwitchTo(old);
-    }
-  }
-}
-
-void session_note_utility(Node *n) {
-  if (SessionFile == NULL)
-    return;
-  switch (nodeTag(n)) {
-  case T_TransactionStmt:
-  case T_VariableSetStmt:
-  case T_VariableShowStmt:
-  case T_PrepareStmt:
-  case T_ExecuteStmt:
-  case T_DeallocateStmt:
-  case T_FetchStmt:
-  case T_ClosePortalStmt:
-  case T_DeclareCursorStmt:
-  case T_ExplainStmt:
-  case T_VacuumStmt:
-  case T_DoStmt:
-  case T_CallStmt:
-    return;
-  default:
-    SchemaDirty = true;
-  }
 }
 
 typedef struct {
@@ -493,18 +385,6 @@ static void restore_table(uint64 len) {
     exec_sql(post);
 }
 
-static void drop_all_temp(void) {
-  if (SPI_execute("SELECT format('DROP TABLE pg_temp.%I', relname) FROM "
-                  "pg_class WHERE relnamespace = pg_my_temp_schema() AND "
-                  "relkind = 'r'",
-                  true, 0) != SPI_OK_SELECT)
-    elog(ERROR, "pgr: cannot list temp tables");
-  uint64 n = SPI_processed;
-  SPITupleTable *tt = SPI_tuptable;
-  for (uint64 i = 0; i < n; i++)
-    exec_sql(SPI_getvalue(tt->vals[i], tt->tupdesc, 1));
-}
-
 static void apply_gucs(const char *buf) {
   Cur c = {buf};
   uint32 n = c_u32(&c);
@@ -525,18 +405,55 @@ static void restore_protocol_prepared(const char *name, const char *q, int np,
 
   Oid *pt = palloc((np + 1) * sizeof(Oid));
   memcpy(pt, types, np * sizeof(Oid));
-
+  int n = np;
+  List *qtrees = NIL;
+  bool lazy = false;
   CachedPlanSource *psrc;
+
   if (trees == NIL) {
     psrc = CreateCachedPlan(NULL, q, CMDTAG_UNKNOWN);
   } else {
     RawStmt *raw = linitial_node(RawStmt, trees);
     psrc = CreateCachedPlan(raw, q, CreateCommandTag(raw->stmt));
+    lazy = analyze_requires_snapshot(raw);
+    if (!lazy)
+      qtrees = pg_analyze_and_rewrite_varparams(raw, q, &pt, &n, NULL);
   }
-  CompleteCachedPlan(psrc, NIL, NULL, pt, np, NULL, NULL,
-                     CURSOR_OPT_PARALLEL_OK, false);
-  psrc->is_valid = trees == NIL;
+  CompleteCachedPlan(psrc, qtrees, NULL, pt, n, NULL, NULL,
+                     CURSOR_OPT_PARALLEL_OK, !lazy);
+  if (lazy)
+    psrc->is_valid = false;
   StorePreparedStatement(name, psrc, false);
+}
+
+static void apply_one_prepared(const char *name, bool from_sql, const char *q,
+                               int np, const Oid *types) {
+  MemoryContext oldcxt = CurrentMemoryContext;
+  ResourceOwner oldowner = CurrentResourceOwner;
+
+  BeginInternalSubTransaction(NULL);
+  PG_TRY();
+  {
+    if (from_sql)
+      exec_sql(q);
+    else
+      restore_protocol_prepared(name, q, np, types);
+    ReleaseCurrentSubTransaction();
+  }
+  PG_CATCH();
+  {
+    MemoryContextSwitchTo(oldcxt);
+    ErrorData *edata = CopyErrorData();
+    FlushErrorState();
+    RollbackAndReleaseCurrentSubTransaction();
+    ereport(WARNING, (errmsg("pgr: cannot restore prepared \"%s\": %s", name,
+                             edata->message)));
+    FreeErrorData(edata);
+  }
+  PG_END_TRY();
+
+  MemoryContextSwitchTo(oldcxt);
+  CurrentResourceOwner = oldowner;
 }
 
 static void apply_prepared(const char *buf) {
@@ -552,29 +469,54 @@ static void apply_prepared(const char *buf) {
       types[j] = c_u32(&c);
     if (name[0] == '\0')
       continue;
-
-    if (!from_sql) {
-      restore_protocol_prepared(name, q, np, types);
-      continue;
-    }
-    exec_sql(q);
+    apply_one_prepared(name, from_sql, q, np, types);
   }
 }
 
-int session_restore(const char *name) {
-  char path[MAXPGPATH];
-  char *gucs = NULL;
-  char *prep = NULL;
-  int count = 0;
+static bool restore_guarded(void (*fn)(void)) {
+  bool ok = true;
+  MemoryContext oldcxt = CurrentMemoryContext;
+  ResourceOwner oldowner = CurrentResourceOwner;
 
-  session_path(name, path);
-  ReadFile = AllocateFile(path, PG_BINARY_R);
-  if (!ReadFile)
-    ereport(ERROR, (errcode_for_file_access(),
-                    errmsg("pgr: cannot open \"%s\": %m", path)));
+  CommandCounterIncrement();
+  BeginInternalSubTransaction(NULL);
+  PG_TRY();
+  {
+    PushActiveSnapshot(GetTransactionSnapshot());
+    fn();
+    PopActiveSnapshot();
+    ReleaseCurrentSubTransaction();
+  }
+  PG_CATCH();
+  {
+    MemoryContextSwitchTo(oldcxt);
+    ErrorData *edata = CopyErrorData();
+    FlushErrorState();
+    RollbackAndReleaseCurrentSubTransaction();
+    ereport(WARNING,
+            (errmsg("pgr: session restore failed: %s", edata->message)));
+    FreeErrorData(edata);
+    ok = false;
+  }
+  PG_END_TRY();
 
+  MemoryContextSwitchTo(oldcxt);
+  CurrentResourceOwner = oldowner;
+  return ok;
+}
+
+typedef struct {
+  uint8 type;
+  uint64 len;
+  off_t next;
+} RestoreItem;
+
+static void restore_body(void) {
   if (SPI_connect() != SPI_OK_CONNECT)
     elog(ERROR, "pgr: SPI_connect failed");
+
+  char *gucs = NULL;
+  char *prep = NULL;
 
   for (;;) {
     uint8 type;
@@ -595,12 +537,8 @@ int session_restore(const char *name) {
     case SessTable:
       restore_table(len);
       break;
-    case SessDropAll:
-      drop_all_temp();
-      break;
     }
     fseeko(ReadFile, next, SEEK_SET);
-    count++;
   }
 
   if (gucs)
@@ -609,9 +547,22 @@ int session_restore(const char *name) {
     apply_prepared(prep);
 
   SPI_finish();
+}
+
+int session_restore(const char *name) {
+  char path[MAXPGPATH];
+
+  session_path(name, path);
+  ReadFile = AllocateFile(path, PG_BINARY_R);
+  if (!ReadFile)
+    ereport(ERROR, (errcode_for_file_access(),
+                    errmsg("pgr: cannot open \"%s\": %m", path)));
+
+  bool ok = restore_guarded(restore_body);
+
   FreeFile(ReadFile);
   ReadFile = NULL;
-  return count;
+  return ok ? 1 : 0;
 }
 
 Datum sql_session_dump(PG_FUNCTION_ARGS) {

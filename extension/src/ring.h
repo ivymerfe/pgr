@@ -5,7 +5,7 @@
 #include "port/atomics.h"
 #include "storage/spin.h"
 
-#define RING_HEADER_SIZE 128 * 1024
+#define RING_HEADER_SIZE (128 * 1024)
 #define RING_BUFFER_SIZE (32 * 1024 * 1024)
 
 typedef struct MessageHeader {

@@ -72,10 +72,6 @@ uint32 reserve_id(const char *subdir, const char *ext);
 bool session_start(const char *name);
 void session_stop(void);
 bool session_active(void);
-void session_commit(void);
-void session_tx_reset(void);
-void session_note_query(QueryDesc *qd);
-void session_note_utility(Node *n);
 int session_restore(const char *name);
 
 // capture

@@ -1,7 +1,7 @@
 #include "pgr.h"
 
 #include "access/xact.h"
-#include "access/xlog.h"
+#include "catalog/namespace.h"
 #include "executor/executor.h"
 #include "libpq/auth.h"
 #include "miscadmin.h"
@@ -14,6 +14,7 @@
 #include "tcop/tcopprot.h"
 #include "tcop/utility.h"
 #include "utils/elog.h"
+#include "utils/lsyscache.h"
 #include "utils/timestamp.h"
 
 static shmem_startup_hook_type prev_shmem_startup = NULL;
@@ -42,9 +43,10 @@ static uint32 TxGen = 0;
 static bool IsUserTransaction = false;
 
 static bool TxCaptured = false;
-static bool TxDelta = false;
 static bool ExitRegistered = false;
 static char SessionName[64];
+
+static bool SkipSnap = false;
 
 static void pgr_exit(int code, Datum arg) {
   if (CaptureLive && Shmem && is_capture_running() &&
@@ -66,7 +68,6 @@ static bool capture_gate() {
     TxGen = xact_enter_shared();
     TxOpen = true;
     TxCaptured = false;
-    TxDelta = false;
     if (!CaptureLive) {
       capture_txbuf_reset();
     }
@@ -90,8 +91,16 @@ static bool capture_gate() {
     }
     snprintf(SessionName, sizeof(SessionName), "%u/%u",
              pg_atomic_read_u32(&Shmem->capture_id), MyClientId);
-    bool fresh = StatementIndex <= 1 && pg_atomic_read_u32(&Shmem->wal_ready);
-    if (!fresh) {
+    SkipSnap = StatementIndex <= 1 && pg_atomic_read_u32(&Shmem->wal_ready);
+  }
+  if (!CaptureLive && !TxOpen) {
+    return false;
+  }
+  if (!CaptureLive && !TxCaptured) {
+    if (SkipSnap) {
+      SkipSnap = false;
+      session_stop();
+    } else {
       session_start(SessionName);
     }
   }
@@ -104,23 +113,13 @@ static bool capture_gate() {
   return true;
 }
 
-static void tx_precommit() {
-  if (!TxOpen || !TxCaptured || CaptureLive || !is_capture_running() ||
-      MyCaptureGen != get_capture_generation() ||
-      pg_atomic_read_u32(&Shmem->wal_ready)) {
-    return;
-  }
-  TxDelta = true;
-  session_commit();
-}
-
 static void tx_finish(bool committed) {
   if (!TxOpen) {
     return;
   }
   TxOpen = false;
   bool last = xact_leave_shared(TxGen);
-  if (TxCaptured && !TxDelta && is_capture_running() &&
+  if (TxCaptured && is_capture_running() &&
       MyCaptureGen == get_capture_generation()) {
     if (!CaptureLive && pg_atomic_read_u32(&Shmem->wal_ready)) {
       go_live();
@@ -132,9 +131,7 @@ static void tx_finish(bool committed) {
   if (!CaptureLive) {
     capture_txbuf_reset();
   }
-  session_tx_reset();
   TxCaptured = false;
-  TxDelta = false;
   if (last) {
     capture_sync_lsn();
   }
@@ -145,9 +142,6 @@ static void pgr_xact_callback(XactEvent event, void *arg) {
     return;
   }
   switch (event) {
-  case XACT_EVENT_PRE_COMMIT:
-    tx_precommit();
-    break;
   case XACT_EVENT_COMMIT:
   case XACT_EVENT_PREPARE:
     tx_finish(true);
@@ -301,7 +295,11 @@ static PlannedStmt *pgr_planner_hook(Query *parse, const char *query_string,
 
 static void pgr_ExecutorStart_hook(QueryDesc *queryDesc, int eflags) {
   IsUserTransaction = true;
-
+  if (StatementIndex >= 20) {
+    Oid o =
+        get_relname_relid("tt126", LookupExplicitNamespace("pg_temp", false));
+    elog(LOG, "pgr: tt126 oid=%u", o);
+  }
   trace_begin();
   if (prev_ExecutorStart) {
     prev_ExecutorStart(queryDesc, eflags);
@@ -329,6 +327,11 @@ static void pgr_ProcessUtility_hook(PlannedStmt *pstmt, const char *queryString,
                                     QueryEnvironment *queryEnv,
                                     DestReceiver *dest, QueryCompletion *qc) {
   IsUserTransaction = true;
+  if (StatementIndex >= 20) {
+    Oid o =
+        get_relname_relid("tt126", LookupExplicitNamespace("pg_temp", false));
+    elog(LOG, "pgr: tt126 oid=%u", o);
+  }
 
   if (is_replay_client() && IsTransactionBlock()) {
     Node *parsetree = pstmt->utilityStmt;

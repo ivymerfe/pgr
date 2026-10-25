@@ -50,7 +50,8 @@ static void cap_begin(uint8_t type) {
 }
 
 static void ring_send(const char *data, size_t len) {
-  ring_push(&Shmem->capture_ring, data, len);
+  if (!ring_push(&Shmem->capture_ring, data, len))
+    ereport(WARNING, (errmsg("pgr: ring full, message dropped")));
   wakeup_capture_worker();
 }
 
