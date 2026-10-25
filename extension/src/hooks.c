@@ -78,7 +78,7 @@ static bool capture_gate() {
     return false;
   }
   uint32 gen = get_capture_generation();
- if (MyCaptureGen != gen) {
+  if (MyCaptureGen != gen) {
     session_stop();
     capture_txbuf_reset();
     CaptureLive = false;
@@ -88,7 +88,7 @@ static bool capture_gate() {
       before_shmem_exit(pgr_exit, 0);
       ExitRegistered = true;
     }
-    snprintf(SessionName, sizeof(SessionName), "c_%u_%u",
+    snprintf(SessionName, sizeof(SessionName), "%u/%u",
              pg_atomic_read_u32(&Shmem->capture_id), MyClientId);
     bool fresh = StatementIndex <= 1 && pg_atomic_read_u32(&Shmem->wal_ready);
     if (!fresh) {

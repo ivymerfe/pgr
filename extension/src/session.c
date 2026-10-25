@@ -41,16 +41,16 @@ PG_FUNCTION_INFO_V1(sql_session_dump);
 PG_FUNCTION_INFO_V1(sql_session_restore);
 
 static void session_path(const char *name, char *path) {
-  size_t n = strlen(name);
-  if (n == 0 || n > 200)
+  const char *slash = strchr(name, '/');
+  bool ok = slash && slash != name && slash[1] != '\0' && strlen(name) <= 40;
+  for (const char *p = name; ok && *p; p++) {
+    if (p != slash && !isdigit((unsigned char)*p))
+      ok = false;
+  }
+  if (!ok)
     ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
                     errmsg("pgr: invalid session name")));
-  for (const char *p = name; *p; p++) {
-    if (!isalnum((unsigned char)*p) && *p != '_' && *p != '-')
-      ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-                      errmsg("pgr: invalid session name")));
-  }
-  snprintf(path, MAXPGPATH, "sessions/%s.pgsession", name);
+  snprintf(path, MAXPGPATH, "sessions/%s.pgs", name);
 }
 
 static void wr(const void *p, size_t n) {
@@ -310,7 +310,12 @@ static void session_abandon(void) {
 bool session_start(const char *name) {
   session_stop();
   session_path(name, SessionPath);
+
+  char dir[MAXPGPATH];
+  snprintf(dir, sizeof(dir), "%s", SessionPath);
+  *strrchr(dir, '/') = '\0';
   MakePGDirectory("sessions");
+  MakePGDirectory(dir);
 
   SessionFile = fopen(SessionPath, "wb");
   if (SessionFile == NULL) {
