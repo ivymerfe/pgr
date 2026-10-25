@@ -38,8 +38,6 @@ def compare(a, b):
 
 
 def main():
-    backup()
-
     print("starting pgbench")
     bench = subprocess.Popen(
         [

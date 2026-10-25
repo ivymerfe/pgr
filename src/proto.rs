@@ -30,12 +30,43 @@ pub const B_PARAMETER_DESC: u8 = b't';
 pub const B_ROW_DESC: u8 = b'T';
 pub const B_READY_FOR_QUERY: u8 = b'Z';
 
+#[derive(Debug, Default)]
+pub struct ErrorFields {
+    pub severity: Option<String>,
+    pub code: Option<String>,
+    pub message: Option<String>,
+    pub detail: Option<String>,
+    pub hint: Option<String>,
+}
+
+impl std::fmt::Display for ErrorFields {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut parts = Vec::new();
+        if let Some(s) = &self.severity {
+            parts.push(format!("severity={}", s));
+        }
+        if let Some(c) = &self.code {
+            parts.push(format!("code={}", c));
+        }
+        if let Some(m) = &self.message {
+            parts.push(format!("message={}", m));
+        }
+        if let Some(d) = &self.detail {
+            parts.push(format!("detail={}", d));
+        }
+        if let Some(h) = &self.hint {
+            parts.push(format!("hint={}", h));
+        }
+        write!(f, "{}", parts.join(", "))
+    }
+}
+
 pub enum BackendMessage<'a> {
     Authentication(Authentication),
     ParameterStatus { _name: String, _value: String },
     BackendKeyData { _pid: i32, _secret: i32 },
     ReadyForQuery,
-    ErrorResponse(String),
+    ErrorResponse(ErrorFields),
     NoticeResponse,
     Other { _tag: u8, _frame: &'a [u8] },
 }
@@ -57,6 +88,24 @@ pub fn try_read_frame(buf: &[u8]) -> Option<(u8, usize)> {
         return None;
     }
     Some((buf[0], frame_len))
+}
+
+pub fn parse_error_fields(mut data: &[u8]) -> ErrorFields {
+    let mut fields = ErrorFields::default();
+    while !data.is_empty() && data[0] != 0 {
+        let field_type = data[0];
+        let (val, rest) = read_cstr(&data[1..]);
+        data = rest;
+        match field_type {
+            b'S' => fields.severity = Some(val),
+            b'C' => fields.code = Some(val),
+            b'M' => fields.message = Some(val),
+            b'D' => fields.detail = Some(val),
+            b'H' => fields.hint = Some(val),
+            _ => {}
+        }
+    }
+    fields
 }
 
 pub fn parse_message(tag: u8, mut data: &[u8]) -> Result<BackendMessage<'_>, ()> {
@@ -101,7 +150,7 @@ pub fn parse_message(tag: u8, mut data: &[u8]) -> Result<BackendMessage<'_>, ()>
             }
         }
         B_READY_FOR_QUERY => BackendMessage::ReadyForQuery,
-        B_ERROR => BackendMessage::ErrorResponse(read_cstr(data).0),
+        B_ERROR => BackendMessage::ErrorResponse(parse_error_fields(data)),
         B_NOTICE => BackendMessage::NoticeResponse,
         other => BackendMessage::Other {
             _tag: other,

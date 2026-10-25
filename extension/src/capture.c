@@ -189,10 +189,10 @@ void capture_sync() {
   cap_end();
 }
 
-// void capture_tx_end(bool committed) {
-//   cap_begin(MsgTypeTxEnd);
-//   cap_u8(committed);
-//   cap_u32(GetTopTransactionIdIfAny());
-//   cap_u64(GetXLogInsertRecPtr());
-//   cap_end();
-// }
+void capture_tx_end(bool committed) {
+  cap_begin(MsgTypeTxEnd);
+  cap_u8(committed);
+  cap_u32(GetTopTransactionIdIfAny());
+  cap_u64(GetXLogInsertRecPtr());
+  cap_end();
+}

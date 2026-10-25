@@ -263,7 +263,7 @@ static bool guarded(void (*fn)(void)) {
   BeginInternalSubTransaction(NULL);
   PG_TRY();
   {
-    PushActiveSnapshot(GetLatestSnapshot());
+    PushActiveSnapshot(GetTransactionSnapshot());
     fn();
     PopActiveSnapshot();
     ReleaseCurrentSubTransaction();
@@ -519,20 +519,23 @@ static void apply_gucs(const char *buf) {
 static void restore_protocol_prepared(const char *name, const char *q, int np,
                                       const Oid *types) {
   List *trees = pg_parse_query(q);
-  if (list_length(trees) != 1)
-    ereport(ERROR,
-            (errmsg("pgr: cannot restore prepared statement \"%s\"", name)));
-  RawStmt *raw = linitial_node(RawStmt, trees);
-  CachedPlanSource *psrc =
-      CreateCachedPlan(raw, q, CreateCommandTag(raw->stmt));
+  if (list_length(trees) > 1)
+    ereport(ERROR, (errmsg("pgr: cannot restore prepared statement \"%s\": %s",
+                           name, q)));
 
   Oid *pt = palloc((np + 1) * sizeof(Oid));
   memcpy(pt, types, np * sizeof(Oid));
-  int n = np;
-  List *qtrees = pg_analyze_and_rewrite_varparams(raw, q, &pt, &n, NULL);
 
-  CompleteCachedPlan(psrc, qtrees, NULL, pt, n, NULL, NULL,
-                     CURSOR_OPT_PARALLEL_OK, true);
+  CachedPlanSource *psrc;
+  if (trees == NIL) {
+    psrc = CreateCachedPlan(NULL, q, CMDTAG_UNKNOWN);
+  } else {
+    RawStmt *raw = linitial_node(RawStmt, trees);
+    psrc = CreateCachedPlan(raw, q, CreateCommandTag(raw->stmt));
+  }
+  CompleteCachedPlan(psrc, NIL, NULL, pt, np, NULL, NULL,
+                     CURSOR_OPT_PARALLEL_OK, false);
+  psrc->is_valid = trees == NIL;
   StorePreparedStatement(name, psrc, false);
 }
 

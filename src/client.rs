@@ -7,7 +7,7 @@ use tracing::{error, info, warn};
 
 use crate::capture::ClientId;
 use crate::proto::{self, Authentication, BackendMessage};
-use crate::utils::{Stream, ReplayStats};
+use crate::utils::{ReplayStats, Stream};
 
 #[derive(Clone)]
 pub struct ReplayConfig {
@@ -149,6 +149,24 @@ impl ReplayClient {
                 }
             },
             ClientState::Normal => {
+                match proto::parse_message(tag, data) {
+                    Ok(msg) => match msg {
+                        BackendMessage::ErrorResponse(e) => {
+                            error!(
+                                "[{}] server error: code={:?}, message={}, detail={:?}, hint={:?}",
+                                self.id,
+                                e.code,
+                                e.message.unwrap_or_default(),
+                                e.detail,
+                                e.hint
+                            );
+                        }
+                        _ => {}
+                    },
+                    Err(()) => {
+                        error!("[{}] malformed server message in normal state", self.id);
+                    }
+                }
                 self.stats.log_recv();
             }
         }
