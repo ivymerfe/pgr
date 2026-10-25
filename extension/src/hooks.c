@@ -295,11 +295,6 @@ static PlannedStmt *pgr_planner_hook(Query *parse, const char *query_string,
 
 static void pgr_ExecutorStart_hook(QueryDesc *queryDesc, int eflags) {
   IsUserTransaction = true;
-  if (StatementIndex >= 20) {
-    Oid o =
-        get_relname_relid("tt126", LookupExplicitNamespace("pg_temp", false));
-    elog(LOG, "pgr: tt126 oid=%u", o);
-  }
   trace_begin();
   if (prev_ExecutorStart) {
     prev_ExecutorStart(queryDesc, eflags);
@@ -327,12 +322,6 @@ static void pgr_ProcessUtility_hook(PlannedStmt *pstmt, const char *queryString,
                                     QueryEnvironment *queryEnv,
                                     DestReceiver *dest, QueryCompletion *qc) {
   IsUserTransaction = true;
-  if (StatementIndex >= 20) {
-    Oid o =
-        get_relname_relid("tt126", LookupExplicitNamespace("pg_temp", false));
-    elog(LOG, "pgr: tt126 oid=%u", o);
-  }
-
   if (is_replay_client() && IsTransactionBlock()) {
     Node *parsetree = pstmt->utilityStmt;
     if (IsA(parsetree, TransactionStmt)) {
