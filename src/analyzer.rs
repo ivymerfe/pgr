@@ -177,6 +177,7 @@ struct QueryInfo {
 
 struct AnalyzeClient {
     id: ClientId,
+    start_ts: u64,
     frame_index: u32,
     queries: VecDeque<QueryInfo>,
     statements: AHashMap<String, usize>,
@@ -184,9 +185,10 @@ struct AnalyzeClient {
 }
 
 impl AnalyzeClient {
-    pub fn new(id: ClientId) -> Self {
+    pub fn new(id: ClientId, start_ts: u64) -> Self {
         Self {
             id,
+            start_ts,
             frame_index: 0,
             queries: VecDeque::new(),
             statements: AHashMap::new(),
@@ -223,6 +225,8 @@ impl AnalyzeClient {
         msg: &CaptureMessage,
         writer: &mut StorageWriter,
     ) -> anyhow::Result<()> {
+        let ts = msg.ts.saturating_sub(self.start_ts);
+
         match &msg.event {
             ClientEvent::SimpleQuery { text } => {
                 self.frame_index += 1;
@@ -231,7 +235,7 @@ impl AnalyzeClient {
                     index: self.frame_index,
                     offset: query_offset,
                     params_offset: NO_PARAMS,
-                    ts: msg.ts,
+                    ts,
                 };
                 self.queries.push_back(info);
             }
@@ -247,7 +251,7 @@ impl AnalyzeClient {
                     index: self.frame_index,
                     offset: query_offset,
                     params_offset: NO_PARAMS,
-                    ts: msg.ts,
+                    ts,
                 };
                 self.queries.push_back(info);
             }
@@ -268,7 +272,7 @@ impl AnalyzeClient {
                             index: self.frame_index,
                             offset: query_offset,
                             params_offset,
-                            ts: msg.ts,
+                            ts,
                         };
                         self.queries.push_back(info);
                     }
@@ -285,7 +289,7 @@ impl AnalyzeClient {
                             index: self.frame_index,
                             offset: *query_offset,
                             params_offset: *params_offset,
-                            ts: msg.ts,
+                            ts,
                         };
                         self.queries.push_back(info);
                     }
@@ -306,6 +310,7 @@ pub fn analyze(
     mut writer: StorageWriter,
 ) -> anyhow::Result<()> {
     let mut clients = AHashMap::<ClientId, AnalyzeClient>::new();
+    let start_ts = capture_reader.start_ts;
 
     let (mut traces_total, mut traces_processed) = (0, 0);
     let mut capture_eof = false;
@@ -319,7 +324,7 @@ pub fn analyze(
         };
         let client = clients
             .entry(trace.id)
-            .or_insert_with(|| AnalyzeClient::new(trace.id));
+            .or_insert_with(|| AnalyzeClient::new(trace.id, start_ts));
         if client.frame_index >= trace.frame_index {
             client.on_trace(&trace, &mut writer)?;
             traces_processed += 1;
@@ -329,7 +334,7 @@ pub fn analyze(
                     Ok(Some(msg)) => {
                         let client = clients
                             .entry(msg.id)
-                            .or_insert_with(|| AnalyzeClient::new(msg.id));
+                            .or_insert_with(|| AnalyzeClient::new(msg.id, start_ts));
                         client.on_capture(&msg, &mut writer)?;
                         if client.id == trace.id && client.frame_index >= trace.frame_index {
                             client.on_trace(&trace, &mut writer)?;
