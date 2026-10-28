@@ -25,11 +25,11 @@ typedef struct MpscRing {
 } MpscRing;
 
 enum RingResult {
-    RingNotReady,
-    RingOverflow,
-    RingOk,
+  RingNotReady,
+  RingOverflow,
+  RingOk,
 };
 
-void ring_init(MpscRing *r);
-bool ring_push(MpscRing *r, const void *msg, uint32 len);
-enum RingResult ring_pop(MpscRing *r, void *buf, uint32 buf_size, uint32 *len);
+void ring_init(MpscRing* r);
+bool ring_push(MpscRing* r, const void* msg, uint32 len);
+enum RingResult ring_pop(MpscRing* r, void* buf, uint32 buf_size, uint32* len);

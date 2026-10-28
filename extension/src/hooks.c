@@ -1,7 +1,6 @@
 #include "pgr.h"
 
 #include "access/xact.h"
-#include "catalog/namespace.h"
 #include "executor/executor.h"
 #include "libpq/auth.h"
 #include "miscadmin.h"
@@ -14,7 +13,6 @@
 #include "tcop/tcopprot.h"
 #include "tcop/utility.h"
 #include "utils/elog.h"
-#include "utils/lsyscache.h"
 #include "utils/timestamp.h"
 
 static shmem_startup_hook_type prev_shmem_startup = NULL;
@@ -39,19 +37,35 @@ uint64 StatementIndex = 0;
 
 static bool TxOpen = false;
 static uint32 TxGen = 0;
+static bool TxCaptured = false;
+static char SessionName[64];
+static bool SkipSnap = false;
+static bool ExitRegistered = false;
 
 static bool IsUserTransaction = false;
 
-static bool TxCaptured = false;
-static bool ExitRegistered = false;
-static char SessionName[64];
-
-static bool SkipSnap = false;
-
 static void pgr_exit(int code, Datum arg) {
-  if (CaptureLive && Shmem && is_capture_running() &&
-      MyCaptureGen == get_capture_generation())
+  if (!Shmem) {
+    return;
+  }
+  AbortOutOfAnyTransaction();
+  if (CaptureLive && is_capture_running() &&
+      MyCaptureGen == get_capture_generation()) {
     capture_disconnect();
+    if (pg_atomic_read_u32(&Shmem->session_debug_enabled)) {
+      char session_name[64];
+      snprintf(session_name, sizeof(session_name), "d/%d", MyClientId);
+      session_start(session_name);
+      session_stop();
+    }
+  }
+  if (MyReplayId != -1 && pg_atomic_read_u32(&Shmem->session_debug_enabled))
+  {
+    char session_name[64];
+    snprintf(session_name, sizeof(session_name), "r/%d", MyReplayId);
+    session_start(session_name);
+    session_stop();
+  }
 }
 
 static void go_live() {
@@ -137,20 +151,20 @@ static void tx_finish(bool committed) {
   }
 }
 
-static void pgr_xact_callback(XactEvent event, void *arg) {
+static void pgr_xact_callback(XactEvent event, void* arg) {
   if (MyBackendType != B_BACKEND || !Shmem) {
     return;
   }
   switch (event) {
-  case XACT_EVENT_COMMIT:
-  case XACT_EVENT_PREPARE:
-    tx_finish(true);
-    break;
-  case XACT_EVENT_ABORT:
-    tx_finish(false);
-    break;
-  default:
-    break;
+    case XACT_EVENT_COMMIT:
+    case XACT_EVENT_PREPARE:
+      tx_finish(true);
+      break;
+    case XACT_EVENT_ABORT:
+      tx_finish(false);
+      break;
+    default:
+      break;
   }
   if (!is_replay_client()) {
     return;
@@ -170,8 +184,9 @@ static void pgr_xact_callback(XactEvent event, void *arg) {
   }
 }
 
-static void pgr_exec_parse_message_hook(const char *query_string,
-                                        const char *stmt_name, Oid *paramTypes,
+static void pgr_exec_parse_message_hook(const char* query_string,
+                                        const char* stmt_name,
+                                        Oid* paramTypes,
                                         int numParams) {
   if (prev_exec_parse_message_hook) {
     prev_exec_parse_message_hook(query_string, stmt_name, paramTypes,
@@ -183,7 +198,7 @@ static void pgr_exec_parse_message_hook(const char *query_string,
   }
 }
 
-static void pgr_exec_simple_query_hook(const char *query_string) {
+static void pgr_exec_simple_query_hook(const char* query_string) {
   if (prev_exec_simple_query_hook) {
     prev_exec_simple_query_hook(query_string);
   }
@@ -193,10 +208,13 @@ static void pgr_exec_simple_query_hook(const char *query_string) {
   }
 }
 
-static void pgr_exec_bind_message_hook(const char *portal_name,
-                                       const char *stmt_name, int numPFormats,
-                                       int16 *pformats, int numRFormats,
-                                       int16 *rformats, int numParams,
+static void pgr_exec_bind_message_hook(const char* portal_name,
+                                       const char* stmt_name,
+                                       int numPFormats,
+                                       int16* pformats,
+                                       int numRFormats,
+                                       int16* rformats,
+                                       int numParams,
                                        ParamListInfo params) {
   if (prev_exec_bind_message_hook) {
     prev_exec_bind_message_hook(portal_name, stmt_name, numPFormats, pformats,
@@ -209,7 +227,7 @@ static void pgr_exec_bind_message_hook(const char *portal_name,
   }
 }
 
-static void pgr_exec_execute_message_hook(const char *portal_name,
+static void pgr_exec_execute_message_hook(const char* portal_name,
                                           long max_rows) {
   if (prev_exec_execute_message_hook) {
     prev_exec_execute_message_hook(portal_name, max_rows);
@@ -233,36 +251,16 @@ static void pgr_pq_msg_sync_hook() {
   }
 }
 
-static void pgr_shmem_request_hook() {
-  if (prev_shmem_request) {
-    prev_shmem_request();
-  }
-
-  RequestAddinShmemSpace(MAXALIGN(sizeof(SharedMemory)));
-}
-
-static void pgr_shmem_startup_hook() {
-  if (prev_shmem_startup) {
-    prev_shmem_startup();
-  }
-
-  bool found_mem;
-  Shmem =
-      (SharedMemory *)ShmemInitStruct("pgr", sizeof(SharedMemory), &found_mem);
-  if (!found_mem) {
-    shmem_init();
-  }
-}
-
-static void pgr_ClientAuthentication_hook(struct Port *port, int status) {
+static void pgr_ClientAuthentication_hook(struct Port* port, int status) {
   if (prev_ClientAuthentication) {
     prev_ClientAuthentication(port, status);
   }
   read_replay_client_id(port);
 }
 
-static void pgr_post_parse_analyze_hook(ParseState *pstate, Query *query,
-                                        const JumbleState *jstate) {
+static void pgr_post_parse_analyze_hook(ParseState* pstate,
+                                        Query* query,
+                                        const JumbleState* jstate) {
   if (is_replay_client()) {
     long secs;
     int usecs;
@@ -276,11 +274,12 @@ static void pgr_post_parse_analyze_hook(ParseState *pstate, Query *query,
   }
 }
 
-static PlannedStmt *pgr_planner_hook(Query *parse, const char *query_string,
+static PlannedStmt* pgr_planner_hook(Query* parse,
+                                     const char* query_string,
                                      int cursorOptions,
                                      ParamListInfo boundParams,
-                                     ExplainState *es) {
-  PlannedStmt *result;
+                                     ExplainState* es) {
+  PlannedStmt* result;
 
   trace_begin();
   if (prev_planner) {
@@ -293,7 +292,7 @@ static PlannedStmt *pgr_planner_hook(Query *parse, const char *query_string,
   return result;
 }
 
-static void pgr_ExecutorStart_hook(QueryDesc *queryDesc, int eflags) {
+static void pgr_ExecutorStart_hook(QueryDesc* queryDesc, int eflags) {
   IsUserTransaction = true;
   trace_begin();
   if (prev_ExecutorStart) {
@@ -304,7 +303,8 @@ static void pgr_ExecutorStart_hook(QueryDesc *queryDesc, int eflags) {
   trace_end('S');
 }
 
-static void pgr_ExecutorRun_hook(QueryDesc *queryDesc, ScanDirection direction,
+static void pgr_ExecutorRun_hook(QueryDesc* queryDesc,
+                                 ScanDirection direction,
                                  uint64 count) {
   trace_begin();
   if (prev_ExecutorRun) {
@@ -315,17 +315,19 @@ static void pgr_ExecutorRun_hook(QueryDesc *queryDesc, ScanDirection direction,
   trace_end('E');
 }
 
-static void pgr_ProcessUtility_hook(PlannedStmt *pstmt, const char *queryString,
+static void pgr_ProcessUtility_hook(PlannedStmt* pstmt,
+                                    const char* queryString,
                                     bool readOnlyTree,
                                     ProcessUtilityContext context,
                                     ParamListInfo params,
-                                    QueryEnvironment *queryEnv,
-                                    DestReceiver *dest, QueryCompletion *qc) {
+                                    QueryEnvironment* queryEnv,
+                                    DestReceiver* dest,
+                                    QueryCompletion* qc) {
   IsUserTransaction = true;
   if (is_replay_client() && IsTransactionBlock()) {
-    Node *parsetree = pstmt->utilityStmt;
+    Node* parsetree = pstmt->utilityStmt;
     if (IsA(parsetree, TransactionStmt)) {
-      TransactionStmt *stmt = (TransactionStmt *)parsetree;
+      TransactionStmt* stmt = (TransactionStmt*)parsetree;
       if (stmt->kind == TRANS_STMT_ROLLBACK) {
         pg_atomic_fetch_add_u64(&Shmem->rollbacks, 1);
       }
@@ -340,6 +342,25 @@ static void pgr_ProcessUtility_hook(PlannedStmt *pstmt, const char *queryString,
                             queryEnv, dest, qc);
   }
   trace_end('U');
+}
+
+static void pgr_shmem_request_hook() {
+  if (prev_shmem_request) {
+    prev_shmem_request();
+  }
+  RequestAddinShmemSpace(MAXALIGN(sizeof(SharedMemory)));
+}
+
+static void pgr_shmem_startup_hook() {
+  if (prev_shmem_startup) {
+    prev_shmem_startup();
+  }
+  bool found_mem;
+  Shmem =
+      (SharedMemory*)ShmemInitStruct("pgr", sizeof(SharedMemory), &found_mem);
+  if (!found_mem) {
+    shmem_init();
+  }
 }
 
 void setup_hooks() {

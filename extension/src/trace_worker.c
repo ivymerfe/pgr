@@ -16,7 +16,7 @@
 
 #define BUFFER_SIZE 1024 * 1024
 
-static FILE *TraceFile = NULL;
+static FILE* TraceFile = NULL;
 static char TraceBuffer[BUFFER_SIZE];
 static uint32 WorkerGeneration = 0;
 
@@ -34,7 +34,7 @@ static bool open_trace() {
   snprintf(path, sizeof(path), "%s/traces/%u.ptr", DataDir,
            pg_atomic_read_u32(&Shmem->trace_id));
 
-  FILE *f = fopen(path, "w");
+  FILE* f = fopen(path, "w");
   if (f == NULL) {
     ereport(ERROR, (errmsg("pgr: could not open trace file %s", path)));
     return false;

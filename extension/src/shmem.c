@@ -1,7 +1,7 @@
 #include "pgr.h"
 #include "ring.h"
 
-SharedMemory *Shmem = NULL;
+SharedMemory* Shmem = NULL;
 
 void shmem_init() {
   pg_atomic_init_u32(&Shmem->capture_id, 0);

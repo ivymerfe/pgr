@@ -35,6 +35,10 @@ CREATE FUNCTION pgr.srestore(p_name text) RETURNS int
 AS 'MODULE_PATHNAME', 'sql_session_restore'
 LANGUAGE C STRICT;
 
+CREATE FUNCTION pgr.sdebug(debug_enabled boolean) RETURNS void
+AS 'MODULE_PATHNAME', 'sql_session_debug'
+LANGUAGE C STRICT;
+
 CREATE FUNCTION pgr.ttdescribe(p_relids oid[] DEFAULT NULL)
 RETURNS TABLE(relid oid, table_name text, columns_ddl text, post_ddl text)
 LANGUAGE plpgsql AS $$

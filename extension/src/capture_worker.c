@@ -16,7 +16,7 @@
 
 #define BUFFER_SIZE 1024 * 1024
 
-static FILE *CaptureFile = NULL;
+static FILE* CaptureFile = NULL;
 static char CaptureBuffer[BUFFER_SIZE];
 static uint32 WorkerGeneration = 0;
 
@@ -34,7 +34,7 @@ static bool open_capture() {
   snprintf(path, sizeof(path), "%s/captures/%u.pr", DataDir,
            pg_atomic_read_u32(&Shmem->capture_id));
 
-  FILE *f = fopen(path, "w");
+  FILE* f = fopen(path, "w");
   if (f == NULL) {
     ereport(ERROR, (errmsg("pgr: could not open capture file %s", path)));
     return false;

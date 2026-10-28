@@ -20,7 +20,7 @@ static StringInfoData TxBuf;
 static bool TxBufInit = false;
 static bool TxBufOverflow = false;
 
-static void cap_raw(const void *data, size_t len) {
+static void cap_raw(const void* data, size_t len) {
   if (CaptureOverflow || CaptureBufferPos + len > sizeof(CaptureBuffer)) {
     CaptureOverflow = true;
     return;
@@ -29,17 +29,30 @@ static void cap_raw(const void *data, size_t len) {
   CaptureBufferPos += len;
 }
 
-static void cap_u8(uint8_t v) { cap_raw(&v, sizeof(v)); }
-static void cap_u16(uint16_t v) { cap_raw(&v, sizeof(v)); }
-static void cap_u32(uint32_t v) { cap_raw(&v, sizeof(v)); }
-static void cap_u64(uint64_t v) { cap_raw(&v, sizeof(v)); }
+static void cap_u8(uint8_t v) {
+  cap_raw(&v, sizeof(v));
+}
 
-static void cap_bytes(const char *data, uint32_t len) {
+static void cap_u16(uint16_t v) {
+  cap_raw(&v, sizeof(v));
+}
+
+static void cap_u32(uint32_t v) {
+  cap_raw(&v, sizeof(v));
+}
+
+static void cap_u64(uint64_t v) {
+  cap_raw(&v, sizeof(v));
+}
+
+static void cap_bytes(const char* data, uint32_t len) {
   cap_u32(len);
   cap_raw(data, len);
 }
 
-static void cap_str(const char *str) { cap_bytes(str, strlen(str)); }
+static void cap_str(const char* str) {
+  cap_bytes(str, strlen(str));
+}
 
 static void cap_begin(uint8_t type) {
   CaptureBufferPos = 0;
@@ -49,27 +62,29 @@ static void cap_begin(uint8_t type) {
   cap_u64(GetCurrentTimestamp());
 }
 
-static void ring_send(const char *data, size_t len) {
-  if (!ring_push(&Shmem->capture_ring, data, len))
+static void ring_send(const char* data, size_t len) {
+  if (!ring_push(&Shmem->capture_ring, data, len)) {
     ereport(WARNING, (errmsg("pgr: ring full, message dropped")));
+  }
   wakeup_capture_worker();
 }
 
-static void txbuf_add(const char *data, size_t len) {
+static void txbuf_add(const char* data, size_t len) {
   if (!TxBufInit) {
     MemoryContext old = MemoryContextSwitchTo(TopMemoryContext);
     initStringInfo(&TxBuf);
     MemoryContextSwitchTo(old);
     TxBufInit = true;
   }
-  if (TxBufOverflow)
+  if (TxBufOverflow) {
     return;
+  }
   if (TxBuf.len + len + sizeof(uint32_t) > TX_BUF_LIMIT) {
     TxBufOverflow = true;
     return;
   }
   uint32_t l = (uint32_t)len;
-  appendBinaryStringInfo(&TxBuf, (char *)&l, sizeof(l));
+  appendBinaryStringInfo(&TxBuf, (char*)&l, sizeof(l));
   appendBinaryStringInfo(&TxBuf, data, len);
 }
 
@@ -77,10 +92,11 @@ static void cap_end() {
   if (CaptureOverflow) {
     ereport(WARNING, (errmsg("pgr: capture message dropped, too large")));
   } else if (CaptureBufferPos > 0) {
-    if (CaptureLive)
+    if (CaptureLive) {
       ring_send(CaptureBuffer, CaptureBufferPos);
-    else
+    } else {
       txbuf_add(CaptureBuffer, CaptureBufferPos);
+    }
   }
   CaptureBufferPos = 0;
   CaptureOverflow = false;
@@ -88,8 +104,9 @@ static void cap_end() {
 
 void capture_txbuf_reset() {
   TxBufOverflow = false;
-  if (!TxBufInit)
+  if (!TxBufInit) {
     return;
+  }
   if (TxBuf.maxlen > 16 * 1024 * 1024) {
     pfree(TxBuf.data);
     TxBufInit = false;
@@ -98,7 +115,7 @@ void capture_txbuf_reset() {
   }
 }
 
-void capture_go_live(const char *session) {
+void capture_go_live(const char* session) {
   CaptureLive = true;
   cap_begin(MsgTypeConnect);
   cap_str(session);
@@ -122,8 +139,9 @@ void capture_go_live(const char *session) {
 void capture_sync_lsn() {
   cap_begin(MsgTypeLsn);
   cap_u64(GetXLogInsertRecPtr());
-  if (!CaptureOverflow)
+  if (!CaptureOverflow) {
     ring_send(CaptureBuffer, CaptureBufferPos);
+  }
   CaptureBufferPos = 0;
   pg_atomic_write_u32(&Shmem->wal_ready, 1);
 }
@@ -133,36 +151,45 @@ void capture_disconnect() {
   cap_end();
 }
 
-void capture_parse(const char *stmt_name, const char *query, Oid *types,
+void capture_parse(const char* stmt_name,
+                   const char* query,
+                   Oid* types,
                    int n) {
   cap_begin(MsgTypeParse);
   cap_str(stmt_name ? stmt_name : "");
   cap_str(query);
   cap_u16(n);
-  for (int i = 0; i < n; i++)
+  for (int i = 0; i < n; i++) {
     cap_u32(types ? types[i] : 0);
+  }
   cap_end();
 }
 
-void capture_simple_query(const char *query) {
+void capture_simple_query(const char* query) {
   cap_begin(MsgTypeSimpleQuery);
   cap_str(query);
   cap_end();
 }
 
-void capture_bind(const char *portal, const char *stmt, int nrf, int16 *rf,
-                  int np, ParamListInfo params) {
+void capture_bind(const char* portal,
+                  const char* stmt,
+                  int nrf,
+                  int16* rf,
+                  int np,
+                  ParamListInfo params) {
   cap_begin(MsgTypeBind);
   cap_str(portal ? portal : "");
   cap_str(stmt ? stmt : "");
   cap_u16(nrf);
-  for (int i = 0; i < nrf; i++)
+  for (int i = 0; i < nrf; i++) {
     cap_u16((uint16_t)rf[i]);
-  if (!params)
+  }
+  if (!params) {
     np = 0;
+  }
   cap_u16(np);
   for (int i = 0; i < np; i++) {
-    ParamExternData *p = &params->params[i];
+    ParamExternData* p = &params->params[i];
     cap_u32(p->ptype);
     if (p->isnull) {
       cap_u32(UINT32_MAX);
@@ -171,14 +198,14 @@ void capture_bind(const char *portal, const char *stmt, int nrf, int16 *rf,
     Oid outfunc;
     bool isvarlena;
     getTypeOutputInfo(p->ptype, &outfunc, &isvarlena);
-    char *s = OidOutputFunctionCall(outfunc, p->value);
+    char* s = OidOutputFunctionCall(outfunc, p->value);
     cap_bytes(s, strlen(s));
     pfree(s);
   }
   cap_end();
 }
 
-void capture_execute(const char *portal, long max_rows) {
+void capture_execute(const char* portal, long max_rows) {
   cap_begin(MsgTypeExecute);
   cap_str(portal ? portal : "");
   cap_u64((uint64_t)(int64_t)max_rows);

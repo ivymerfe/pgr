@@ -18,7 +18,7 @@ JAR = "./tests/bench.jar"
 CLASS = "tests.roznica.TempCatalogRoznicaLike"
 USER = "yami"
 TIME = 6
-NUM_WORKERS = 20
+NUM_WORKERS = 10
 CAPTURE_DELAY_MIN = 1
 CAPTURE_DELAY_MAX = 3
 
@@ -53,10 +53,9 @@ def compare(a, b):
 
 
 def main():
-    open('pg.log', 'w').close()
+    open("pg.log", "w").close()
 
-    # initial = snapshot("initial")
-
+    psql("select pgr.sdebug(true);")
     print("starting bench")
     bench = subprocess.Popen(
         [
@@ -83,28 +82,14 @@ def main():
     bench.wait()
     stop_capture()
 
-    # before = snapshot("after test")
-
-    # lsn = get_lsn(capture_path)
-    # if not lsn:
-    #     print("failed to get lsn")
-    #     return 2
-
-    # recover(lsn)
-    # rolled_back = snapshot("after rollback")
-
     if replay(capture_path) != 0:
         print("replay failed")
+        psql("select pgr.sdebug(false);")
         return 2
 
-    # after = snapshot("after replay")
+    psql("select pgr.sdebug(false);")
 
-    # print("initial vs rollback:")
-    # compare(initial, rolled_back)
-    # print("after test vs after replay:")
-    # bad = compare(before, after)
-    # print(f"mismatched tables: {bad}")
-    return 0 
+    return 0
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 #include "ring.h"
 
-void ring_init(MpscRing *r) {
+void ring_init(MpscRing* r) {
   SpinLockInit(&r->lock);
   r->hhead = 0;
   r->dhead = 0;
@@ -13,8 +13,8 @@ void ring_init(MpscRing *r) {
   }
 }
 
-bool ring_push(MpscRing *r, const void *msg, uint32 len) {
-  MsgHdr *h;
+bool ring_push(MpscRing* r, const void* msg, uint32 len) {
+  MsgHdr* h;
   uint64 off, pos, first;
 
   SpinLockAcquire(&r->lock);
@@ -37,17 +37,18 @@ bool ring_push(MpscRing *r, const void *msg, uint32 len) {
   pos = off % RING_BUFFER_SIZE;
   first = Min((uint64)len, RING_BUFFER_SIZE - pos);
   memcpy(r->data + pos, msg, first);
-  if (first < len)
-    memcpy(r->data, (const char *)msg + first, len - first);
+  if (first < len) {
+    memcpy(r->data, (const char*)msg + first, len - first);
+  }
 
   pg_write_barrier();
   pg_atomic_write_u32(&h->ready, 1);
   return true;
 }
 
-enum RingResult ring_pop(MpscRing *r, void *buf, uint32 buf_size, uint32 *len) {
+enum RingResult ring_pop(MpscRing* r, void* buf, uint32 buf_size, uint32* len) {
   uint64 t = pg_atomic_read_u64(&r->htail);
-  MsgHdr *h = &r->hdrs[t % RING_HEADER_SIZE];
+  MsgHdr* h = &r->hdrs[t % RING_HEADER_SIZE];
   uint64 pos, first;
   uint32 n;
 
@@ -65,8 +66,9 @@ enum RingResult ring_pop(MpscRing *r, void *buf, uint32 buf_size, uint32 *len) {
   pos = h->off % RING_BUFFER_SIZE;
   first = Min((uint64)n, RING_BUFFER_SIZE - pos);
   memcpy(buf, r->data + pos, first);
-  if (first < n)
-    memcpy((char *)buf + first, r->data, n - first);
+  if (first < n) {
+    memcpy((char*)buf + first, r->data, n - first);
+  }
 
   pg_atomic_write_u32(&h->ready, 0);
   pg_write_barrier();

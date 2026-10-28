@@ -1,0 +1,4 @@
+BasedOnStyle: Chromium
+InsertBraces: true
+SeparateDefinitionBlocks: Always
+MaxEmptyLinesToKeep: 1
