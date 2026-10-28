@@ -24,6 +24,7 @@ typedef struct {
 static const ChannelDesc Descs[ChanCount] = {
     [ChanCapture] = {"capture", "captures", "pr", MsgTypeLsn},
     [ChanTrace] = {"trace", "traces", "ptr", 0},
+    [ChanTiming] = {"timing", "timings", "ptm", 0},
 };
 
 static FILE* File = NULL;

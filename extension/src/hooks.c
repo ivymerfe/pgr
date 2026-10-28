@@ -55,6 +55,7 @@ static void pgr_exit(int code, Datum arg) {
     return;
   }
   ExitDone = true;
+  send_timing_event(MsgTypeDisconnect);
   AbortOutOfAnyTransaction();
   if (CaptureLive && channel_running(ChanCapture) &&
       MyCaptureGen == channel_generation(ChanCapture)) {
@@ -210,6 +211,7 @@ static void pgr_exec_parse_message_hook(const char* query_string,
                                         const char* stmt_name,
                                         Oid* paramTypes,
                                         int numParams) {
+  send_timing_event(MsgTypeParse);
   if (prev_exec_parse_message_hook) {
     prev_exec_parse_message_hook(query_string, stmt_name, paramTypes,
                                  numParams);
@@ -221,6 +223,7 @@ static void pgr_exec_parse_message_hook(const char* query_string,
 }
 
 static void pgr_exec_simple_query_hook(const char* query_string) {
+  send_timing_event(MsgTypeSimpleQuery);
   if (prev_exec_simple_query_hook) {
     prev_exec_simple_query_hook(query_string);
   }
@@ -238,6 +241,7 @@ static void pgr_exec_bind_message_hook(const char* portal_name,
                                        int16* rformats,
                                        int numParams,
                                        ParamListInfo params) {
+  send_timing_event(MsgTypeBind);
   if (prev_exec_bind_message_hook) {
     prev_exec_bind_message_hook(portal_name, stmt_name, numPFormats, pformats,
                                 numRFormats, rformats, numParams, params);
@@ -251,6 +255,7 @@ static void pgr_exec_bind_message_hook(const char* portal_name,
 
 static void pgr_exec_execute_message_hook(const char* portal_name,
                                           long max_rows) {
+  send_timing_event(MsgTypeExecute);
   if (prev_exec_execute_message_hook) {
     prev_exec_execute_message_hook(portal_name, max_rows);
   }
@@ -261,6 +266,7 @@ static void pgr_exec_execute_message_hook(const char* portal_name,
 }
 
 static void pgr_pq_msg_sync_hook() {
+  send_timing_event(MsgTypeSync);
   if (prev_pq_msg_sync_hook) {
     prev_pq_msg_sync_hook();
   }
@@ -270,6 +276,7 @@ static void pgr_pq_msg_sync_hook() {
 }
 
 static void pgr_pq_msg_close_hook(int close_type, const char* close_target) {
+  send_timing_event(MsgTypeClose);
   if (prev_pq_msg_close_hook) {
     prev_pq_msg_close_hook(close_type, close_target);
   }
@@ -283,6 +290,7 @@ static void pgr_ClientAuthentication_hook(struct Port* port, int status) {
     prev_ClientAuthentication(port, status);
   }
   read_replay_client_id(port);
+  send_timing_event(MsgTypeConnect);
 }
 
 static void pgr_post_parse_analyze_hook(ParseState* pstate,

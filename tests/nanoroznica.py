@@ -15,6 +15,9 @@ CAPTURE_DELAY_MAX = 1
 
 def main():
     open('pg.log', 'w').close()
+    shutil.rmtree(DATA + '/sessions/d')
+    shutil.rmtree(DATA + '/sessions/r')
+    
     psql("select pgr.sdebug(true);")
 
     print("starting bench")
@@ -43,11 +46,15 @@ def main():
     bench.wait()
     stop_capture()
 
+    psql("select pgr.timestart();");
+
     if replay(capture_path) != 0:
         print("replay failed")
+        psql("select pgr.timestop();");
         psql("select pgr.sdebug(false);")
         return 2
-    
+
+    psql("select pgr.timestop();");
     psql("select pgr.sdebug(false);")
     compare_sessions()
 

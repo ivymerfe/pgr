@@ -14,6 +14,14 @@ CREATE OR REPLACE FUNCTION pgr.tstop() RETURNS boolean
 AS 'MODULE_PATHNAME', 'sql_trace_stop'
 LANGUAGE C STRICT PARALLEL SAFE;
 
+CREATE OR REPLACE FUNCTION pgr.timestart() RETURNS int
+AS 'MODULE_PATHNAME', 'sql_time_start'
+LANGUAGE C STRICT PARALLEL SAFE;
+
+CREATE OR REPLACE FUNCTION pgr.timestop() RETURNS boolean
+AS 'MODULE_PATHNAME', 'sql_time_stop'
+LANGUAGE C STRICT PARALLEL SAFE;
+
 CREATE OR REPLACE FUNCTION pgr.getstats(
     OUT commits bigint,
     OUT rollbacks bigint,
@@ -27,19 +35,19 @@ RETURNS void
 AS 'MODULE_PATHNAME', 'sql_reset_stats'
 LANGUAGE C STRICT PARALLEL SAFE;
 
-CREATE FUNCTION pgr.sdump(p_name text) RETURNS int
+CREATE OR REPLACE FUNCTION pgr.sdump(p_name text) RETURNS int
 AS 'MODULE_PATHNAME', 'sql_session_dump'
 LANGUAGE C STRICT;
 
-CREATE FUNCTION pgr.srestore(p_name text) RETURNS int
+CREATE OR REPLACE FUNCTION pgr.srestore(p_name text) RETURNS int
 AS 'MODULE_PATHNAME', 'sql_session_restore'
 LANGUAGE C STRICT;
 
-CREATE FUNCTION pgr.sdebug(debug_enabled boolean) RETURNS void
+CREATE OR REPLACE FUNCTION pgr.sdebug(debug_enabled boolean) RETURNS void
 AS 'MODULE_PATHNAME', 'sql_session_debug'
 LANGUAGE C STRICT;
 
-CREATE FUNCTION pgr.ttdescribe(p_relids oid[] DEFAULT NULL)
+CREATE OR REPLACE FUNCTION pgr.ttdescribe(p_relids oid[] DEFAULT NULL)
 RETURNS TABLE(relid oid, table_name text, columns_ddl text, post_ddl text)
 LANGUAGE plpgsql AS $$
 DECLARE

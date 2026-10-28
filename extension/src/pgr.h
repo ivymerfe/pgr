@@ -11,7 +11,7 @@
 
 #include "ring.h"
 
-typedef enum { ChanCapture, ChanTrace, ChanCount } ChannelKind;
+typedef enum { ChanCapture, ChanTrace, ChanTiming, ChanCount } ChannelKind;
 
 typedef struct {
   pg_atomic_uint32 id;
@@ -117,7 +117,7 @@ uint32 xact_enter_shared();
 bool xact_leave_shared(uint32 gen);
 bool xact_is_pre(uint32 gen);
 
-// trace
+// replay analysis
 
 void read_replay_client_id(Port* port);
 bool is_replay_client();
@@ -125,3 +125,5 @@ bool is_replay_client();
 void send_trace_event(char event_type, uint32 duration_us);
 void trace_begin();
 void trace_end(char event_type);
+
+void send_timing_event(uint8 type);

@@ -11,6 +11,9 @@ PG_FUNCTION_INFO_V1(sql_capture_stop);
 PG_FUNCTION_INFO_V1(sql_trace_start);
 PG_FUNCTION_INFO_V1(sql_trace_stop);
 
+PG_FUNCTION_INFO_V1(sql_time_start);
+PG_FUNCTION_INFO_V1(sql_time_stop);
+
 PG_FUNCTION_INFO_V1(sql_get_stats);
 PG_FUNCTION_INFO_V1(sql_reset_stats);
 
@@ -35,6 +38,16 @@ Datum sql_trace_start(PG_FUNCTION_ARGS) {
 
 Datum sql_trace_stop(PG_FUNCTION_ARGS) {
   channel_stop(ChanTrace);
+  PG_RETURN_BOOL(true);
+}
+
+Datum sql_time_start(PG_FUNCTION_ARGS) {
+  uint32 id = channel_start(ChanTiming);
+  PG_RETURN_INT32(id);
+}
+
+Datum sql_time_stop(PG_FUNCTION_ARGS) {
+  channel_stop(ChanTiming);
   PG_RETURN_BOOL(true);
 }
 

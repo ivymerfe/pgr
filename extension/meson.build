@@ -16,6 +16,7 @@ sources = files(
   'src/ring.c',
   'src/session.c',
   'src/shmem.c',
+  'src/timing.c',
   'src/trace.c',
 )
 
