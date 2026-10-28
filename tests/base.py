@@ -43,8 +43,42 @@ def stop_capture():
     psql("select pgr.cstop()")
 
 
+def start_timings() -> str:
+    id = int(psql("select pgr.timestart()"))
+    path = f"{DATA}/timings/{id}.ptm"
+    print(f"timings id = {id}, path = {path}")
+    return path
+
+
+def stop_timings():
+    print("stopping timings")
+    psql("select pgr.timestop()")
+
+
+def enable_debug_sessions():
+    print("enabling debug sessions")
+    psql("select pgr.sdebug(true);")
+
+
+def disable_debug_sessions():
+    print("disabling debug sessions")
+    psql("select pgr.sdebug(false);")
+
+
+def remove_debug_sessions():
+    print("removing old sessions")
+    shutil.rmtree(os.path.join(DATA, 'sessions', 'd'))
+    shutil.rmtree(os.path.join(DATA, 'sessions', 'r'))
+
+
 def replay(capture_path):
     return subprocess.run([PGR, "replay", capture_path]).returncode
+
+
+def compare_timings(capture_path, timings_path):
+    return subprocess.run(
+        [PGR, "compare", "-c", capture_path, "-t", timings_path]
+    ).returncode
 
 
 def get_lsn(capture_path):

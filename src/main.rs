@@ -14,6 +14,7 @@ use tracing_subscriber::fmt::time::OffsetTime;
 use crate::analyzer::StorageWriter;
 use crate::capture::CaptureReader;
 use crate::client::ReplayConfig;
+use crate::compare::TimingReader;
 use crate::manager::ReplayManager;
 use crate::trace_reader::TraceReader;
 
@@ -21,6 +22,7 @@ mod analyzer;
 mod capture;
 mod capture_dump;
 mod client;
+mod compare;
 mod r#loop;
 mod manager;
 mod proto;
@@ -65,16 +67,13 @@ enum Commands {
         #[arg(short, long, default_value = "capture.csv", value_parser = parse_absolute, help = "Output CSV path")]
         output: PathBuf,
     },
-    #[command(about = "Compare two captures")]
+    #[command(about = "Compare capture timings with replay timings")]
     Compare {
         #[arg(short, long, value_parser = parse_absolute, help = "Source capture")]
-        src: PathBuf,
+        capture: PathBuf,
 
-        #[arg(short, long, value_parser = parse_absolute, help = "Replay capture")]
-        replay: PathBuf,
-
-        #[arg(long, help = "File to save differences to")]
-        delta: Option<PathBuf>,
+        #[arg(short, long, value_parser = parse_absolute, help = "Replay timing file")]
+        timing: PathBuf,
     },
     #[command(about = "Print WAL sync point of an extension capture")]
     Lsn {
@@ -163,12 +162,13 @@ fn run_command(cli: Cli) -> anyhow::Result<()> {
             capture_dump::dump(reader, output_file)?;
             info!("Done");
         }
-        Commands::Compare { src, replay, delta } => {
-            let src_file = try_open(&src)?;
-            let replay_file = try_open(&replay)?;
-            let src_reader = CaptureReader::new(src_file)?;
-            let replay_reader = CaptureReader::new(replay_file)?;
-            info!("Comparing {} <-> {}", src.display(), replay.display());
+        Commands::Compare { capture, timing } => {
+            let capture_reader = CaptureReader::new(try_open(&capture)?)?;
+            let timing_reader = TimingReader::new(try_open(&timing)?);
+            info!("Comparing {} <-> {}", capture.display(), timing.display());
+            let start = Instant::now();
+            compare::compare(capture_reader, timing_reader)?;
+            info!("Done in {} ms", start.elapsed().as_millis());
         }
         Commands::Lsn { input } => {
             let file = try_open(&input)?;

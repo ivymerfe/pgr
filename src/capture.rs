@@ -5,16 +5,16 @@ use std::{
 
 pub type ClientId = u32;
 
-const MSG_LSN: u8 = 1;
-const MSG_CONNECT: u8 = 2;
-const MSG_DISCONNECT: u8 = 3;
-const MSG_SIMPLE_QUERY: u8 = 4;
-const MSG_PARSE: u8 = 5;
-const MSG_BIND: u8 = 6;
-const MSG_EXECUTE: u8 = 7;
-const MSG_SYNC: u8 = 8;
-const MSG_TX_END: u8 = 9;
-const MSG_CLOSE: u8 = 10;
+pub const MSG_LSN: u8 = 1;
+pub const MSG_CONNECT: u8 = 2;
+pub const MSG_DISCONNECT: u8 = 3;
+pub const MSG_SIMPLE_QUERY: u8 = 4;
+pub const MSG_PARSE: u8 = 5;
+pub const MSG_BIND: u8 = 6;
+pub const MSG_EXECUTE: u8 = 7;
+pub const MSG_SYNC: u8 = 8;
+pub const MSG_TX_END: u8 = 9;
+pub const MSG_CLOSE: u8 = 10;
 
 pub struct BindParam {
     pub type_oid: u32,
