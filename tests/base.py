@@ -67,8 +67,13 @@ def disable_debug_sessions():
 
 def remove_debug_sessions():
     print("removing old sessions")
-    shutil.rmtree(os.path.join(DATA, 'sessions', 'd'))
-    shutil.rmtree(os.path.join(DATA, 'sessions', 'r'))
+    orig_sessions = os.path.join(DATA, 'sessions', 'd')
+    replay_sessions = os.path.join(DATA, 'sessions', 'r')
+
+    if os.path.exists(orig_sessions):
+        shutil.rmtree(orig_sessions)
+    if os.path.exists(replay_sessions):
+        shutil.rmtree(replay_sessions)
 
 
 def replay(capture_path):

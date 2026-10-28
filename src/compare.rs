@@ -82,11 +82,16 @@ struct TypeStats {
 struct ClientStats {
     cap: VecDeque<(u8, u64, bool)>,
     tim: VecDeque<(u8, u64)>,
+    anchor: Option<(u64, u64)>,
     connect_us: Option<i64>,
-    disconnect_us: Option<i64>,
+    disconnect: Option<(u64, u64)>,
     msgs: TypeStats,
     matched: u64,
     skipped: u64,
+}
+
+fn dev(p: (u64, u64), a: (u64, u64)) -> i64 {
+    (p.1 as i64 - a.1 as i64) - (p.0 as i64 - a.0 as i64)
 }
 
 fn event_code(e: &ClientEvent) -> Option<u8> {
@@ -103,7 +108,7 @@ fn event_code(e: &ClientEvent) -> Option<u8> {
     }
 }
 
-fn drain(c: &mut ClientStats, anchor: &mut Option<(u64, u64)>) {
+fn drain(c: &mut ClientStats, origin: &mut Option<(u64, u64)>) {
     while let (Some((ct, cts, restore)), Some((tt, tts))) =
         (c.cap.front().copied(), c.tim.front().copied())
     {
@@ -113,17 +118,22 @@ fn drain(c: &mut ClientStats, anchor: &mut Option<(u64, u64)>) {
             continue;
         }
         c.tim.pop_front();
-        let (ac, at) = *anchor.get_or_insert((cts, tts));
-        let dev = (tts as i64 - at as i64) - (cts as i64 - ac as i64);
+        let p = (cts, tts);
         match ct {
-            MSG_CONNECT => c.connect_us = Some(dev),
-            MSG_DISCONNECT => c.disconnect_us = Some(dev),
-            _ if restore => {}
+            MSG_CONNECT => {
+                let o = *origin.get_or_insert(p);
+                c.connect_us = Some(dev(p, o));
+                c.anchor = Some(p);
+            }
+            MSG_DISCONNECT => c.disconnect = Some(p),
+            _ if restore => c.anchor = Some(p),
             _ => {
-                if dev >= 0 {
-                    c.msgs.late.add(dev as u64);
+                let a = *c.anchor.get_or_insert(p);
+                let d = dev(p, a);
+                if d >= 0 {
+                    c.msgs.late.add(d as u64);
                 } else {
-                    c.msgs.early.add(dev.unsigned_abs());
+                    c.msgs.early.add(d.unsigned_abs());
                 }
             }
         }
@@ -136,7 +146,7 @@ pub fn compare(
     mut timing_reader: TimingReader,
 ) -> anyhow::Result<()> {
     let mut clients = AHashMap::<ClientId, ClientStats>::new();
-    let mut anchor: Option<(u64, u64)> = None;
+    let mut origin: Option<(u64, u64)> = None;
     let mut capture_eof = false;
 
     loop {
@@ -147,7 +157,7 @@ pub fn compare(
         };
         let c = clients.entry(t.id).or_default();
         c.tim.push_back((t.event_type, t.ts));
-        drain(c, &mut anchor);
+        drain(c, &mut origin);
 
         while !capture_eof && !clients[&t.id].tim.is_empty() {
             match capture_reader.read_event() {
@@ -162,7 +172,7 @@ pub fn compare(
                         if restore {
                             c.cap.push_back((MSG_SIMPLE_QUERY, msg.ts, true));
                         }
-                        drain(c, &mut anchor);
+                        drain(c, &mut origin);
                     }
                 }
                 Ok(None) => {
@@ -179,17 +189,19 @@ pub fn compare(
     let (mut matched, mut unmatched) = (0u64, 0u64);
     for id in &ids {
         let c = clients.get_mut(&id).unwrap();
-        drain(c, &mut anchor);
+        drain(c, &mut origin);
         matched += c.matched;
         unmatched += c.tim.len() as u64;
 
-        let connect_ms = c.connect_us.unwrap_or(0) as f64 / 1e3;
-        let disconnect_ms = c.disconnect_us.unwrap_or(0) as f64 / 1e3;
+        let ms = |p: Option<(u64, u64)>| match (p, c.anchor) {
+            (Some(p), Some(a)) => dev(p, a) as f64 / 1e3,
+            _ => 0.0,
+        };
         info!(
             "[{}] c={:+.3}ms d={:+.3}ms avg={:+.3}ms max={:+.3}ms <{}/{}> avg={:+.3}ms max={:+.3}ms",
             id,
-            connect_ms,
-            disconnect_ms,
+            c.connect_us.unwrap_or(0) as f64 / 1e3,
+            ms(c.disconnect),
             -c.msgs.early.avg_ms(),
             -c.msgs.early.max_ms(),
             c.msgs.early.count,

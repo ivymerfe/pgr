@@ -9,7 +9,7 @@ use mio::net::TcpStream;
 use mio::{Events, Interest, Poll, Token};
 use quanta::Instant;
 use socket2::Socket;
-use tracing::error;
+use tracing::{error, info};
 
 use crate::capture::ClientId;
 use crate::client::{ClientState, NewConnection, ReplayClient, ReplayConfig};
@@ -67,6 +67,10 @@ pub struct ReplayLoop {
     started: bool,
     pending_commands: VecDeque<ConnCommand>,
     rx_closed: bool,
+
+    lag_sum: u64,
+    lag_max: u64,
+    lag_n: u64,
 }
 
 impl ReplayLoop {
@@ -90,6 +94,9 @@ impl ReplayLoop {
             started: false,
             pending_commands: VecDeque::new(),
             rx_closed: false,
+            lag_sum: 0,
+            lag_max: 0,
+            lag_n: 0,
         })
     }
 
@@ -138,6 +145,13 @@ impl ReplayLoop {
                 break;
             }
         }
+        if self.lag_n > 0 {
+            info!(
+                "send lag avg={:.3}ms max={:.3}ms",
+                self.lag_sum as f64 / self.lag_n as f64 / 1e3,
+                self.lag_max as f64 / 1e3
+            );
+        }
     }
 
     fn drain_commands(&mut self) {
@@ -156,9 +170,14 @@ impl ReplayLoop {
     fn dispatch_ready(&mut self, conns: &mut HashMap<ClientId, Connection>) {
         let now = self.now_us();
         while let Some(front) = self.pending_commands.front() {
-            if front.ts() > now {
+            let ts = front.ts();
+            if ts > now {
                 break;
             }
+            let lag = now - ts;
+            self.lag_sum += lag;
+            self.lag_n += 1;
+            self.lag_max = self.lag_max.max(lag);
             let cmd = self.pending_commands.pop_front().unwrap();
             self.dispatch_command(conns, cmd);
         }
