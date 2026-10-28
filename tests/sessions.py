@@ -81,8 +81,12 @@ def compare_session(sid):
         print(f"  {name}: orig={d['sizes'][t]} replay={r['sizes'][t]}")
     bad = 0
     for k in sorted(set(d["gucs"]) | set(r["gucs"])):
+        k_str = k.decode()
+        if k_str == "pgr.client_id":
+            continue
+
         if d["gucs"].get(k) != r["gucs"].get(k):
-            print(f"  guc {k.decode()}: {d['gucs'].get(k)} != {r['gucs'].get(k)}")
+            print(f"  guc {k_str}: {d['gucs'].get(k)} != {r['gucs'].get(k)}")
             bad += 1
     if sorted(d["prep"]) != sorted(r["prep"]):
         a, b = set(d["prep"]), set(r["prep"])

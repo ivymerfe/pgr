@@ -24,6 +24,7 @@ static exec_simple_query_hook_type prev_exec_simple_query_hook = NULL;
 static exec_bind_message_hook_type prev_exec_bind_message_hook = NULL;
 static exec_execute_message_hook_type prev_exec_execute_message_hook = NULL;
 static pq_msg_sync_hook_type prev_pq_msg_sync_hook = NULL;
+static pq_msg_close_hook_type prev_pq_msg_close_hook = NULL;
 
 static ClientAuthentication_hook_type prev_ClientAuthentication = NULL;
 static post_parse_analyze_hook_type prev_post_parse_analyze = NULL;
@@ -262,12 +263,17 @@ static void pgr_pq_msg_sync_hook() {
   if (prev_pq_msg_sync_hook) {
     prev_pq_msg_sync_hook();
   }
-  if (!IsTransactionState() && is_capture_running() &&
-      MyCaptureGen != get_capture_generation()) {
-    return;
-  }
   if (capture_gate()) {
     capture_sync();
+  }
+}
+
+static void pgr_pq_msg_close_hook(int close_type, const char* close_target) {
+  if (prev_pq_msg_close_hook) {
+    prev_pq_msg_close_hook(close_type, close_target);
+  }
+  if (capture_gate()) {
+    capture_close(close_type, close_target);
   }
 }
 
@@ -404,6 +410,9 @@ void setup_hooks() {
 
   prev_pq_msg_sync_hook = pq_msg_sync_hook;
   pq_msg_sync_hook = pgr_pq_msg_sync_hook;
+
+  prev_pq_msg_close_hook = pq_msg_close_hook;
+  pq_msg_close_hook = pgr_pq_msg_close_hook;
 
   prev_ClientAuthentication = ClientAuthentication_hook;
   ClientAuthentication_hook = pgr_ClientAuthentication_hook;

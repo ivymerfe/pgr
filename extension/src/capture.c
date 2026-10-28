@@ -224,3 +224,10 @@ void capture_tx_end(bool committed) {
   cap_u64(GetXLogInsertRecPtr());
   cap_end();
 }
+
+void capture_close(int close_type, const char* target) {
+  cap_begin(MsgTypeClose);
+  cap_u8((uint8_t)close_type);
+  cap_str(target ? target : "");
+  cap_end();
+}

@@ -58,6 +58,7 @@ enum {
   MsgTypeExecute,
   MsgTypeSync,
   MsgTypeTxEnd,
+  MsgTypeClose,
 };
 
 void setup_hooks();
@@ -98,6 +99,7 @@ void capture_bind(const char* portal,
 void capture_execute(const char* portal, long max_rows);
 void capture_sync(void);
 void capture_tx_end(bool committed);
+void capture_close(int close_type, const char* target);
 
 uint32 xact_enter_shared();
 bool xact_leave_shared(uint32 gen);

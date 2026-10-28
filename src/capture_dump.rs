@@ -114,6 +114,11 @@ pub fn dump(mut reader: CaptureReader, output: File) -> anyhow::Result<()> {
                 text(&mut w, if committed { b"commit" } else { b"abort" })?;
                 write!(w, ",{},{}", xid, lsn)?;
             }
+            ClientEvent::Close { kind, name } => {
+                head(&mut w, m.ts, base, m.id, "close")?;
+                write!(w, ",{}", kind)?;
+                text(&mut w, name.as_bytes())?;
+            }
         }
         w.write_all(b"\n")?;
     }

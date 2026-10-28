@@ -14,6 +14,7 @@ const MSG_BIND: u8 = 6;
 const MSG_EXECUTE: u8 = 7;
 const MSG_SYNC: u8 = 8;
 const MSG_TX_END: u8 = 9;
+const MSG_CLOSE: u8 = 10;
 
 pub struct BindParam {
     pub type_oid: u32,
@@ -51,6 +52,10 @@ pub enum ClientEvent {
         committed: bool,
         xid: u32,
         lsn: u64,
+    },
+    Close {
+        kind: u8,
+        name: String,
     },
 }
 
@@ -194,6 +199,10 @@ impl CaptureReader {
                 committed: self.u8()? != 0,
                 xid: self.u32()?,
                 lsn: self.u64()?,
+            },
+            MSG_CLOSE => ClientEvent::Close {
+                kind: self.u8()?,
+                name: self.string()?,
             },
             _ => {
                 return Err(io::Error::new(

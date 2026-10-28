@@ -141,6 +141,12 @@ fn emit(msg: CaptureMessage, ts: u64, out: &mut Sink) {
             (proto::F_EXECUTE, end(v))
         }
         ClientEvent::Sync => (proto::F_SYNC, end(begin(proto::F_SYNC, 0))),
+        ClientEvent::Close { kind, name } => {
+            let mut v = begin(proto::F_CLOSE, name.len() + 2);
+            v.push(kind);
+            cstr(&mut v, &name);
+            (proto::F_CLOSE, end(v))
+        }
     };
     out.push(ConnCommand::Send { id, ts, tag, data });
 }
