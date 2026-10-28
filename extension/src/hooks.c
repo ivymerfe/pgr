@@ -56,8 +56,8 @@ static void pgr_exit(int code, Datum arg) {
   }
   ExitDone = true;
   AbortOutOfAnyTransaction();
-  if (CaptureLive && is_capture_running() &&
-      MyCaptureGen == get_capture_generation()) {
+  if (CaptureLive && channel_running(ChanCapture) &&
+      MyCaptureGen == channel_generation(ChanCapture)) {
     capture_disconnect();
     if (pg_atomic_read_u32(&Shmem->session_debug_enabled)) {
       char session_name[64];
@@ -75,7 +75,7 @@ static void pgr_exit(int code, Datum arg) {
 }
 
 static void ensure_exit_registered(void) {
-  if (!is_replay_client() && !is_capture_running()) {
+  if (!is_replay_client() && !channel_running(ChanCapture)) {
     return;
   }
   if (!ExitRegistered) {
@@ -106,22 +106,23 @@ static bool capture_gate() {
       capture_txbuf_reset();
     }
   }
-  if (!is_capture_running()) {
+  if (!channel_running(ChanCapture)) {
     return false;
   }
   if (TxOpen && xact_is_pre(TxGen)) {
     return false;
   }
-  uint32 gen = get_capture_generation();
+  uint32 gen = channel_generation(ChanCapture);
   if (MyCaptureGen != gen) {
     session_stop();
     capture_txbuf_reset();
     CaptureLive = false;
     MyCaptureGen = gen;
     MyClientId = acquire_client_id();
-    snprintf(SessionName, sizeof(SessionName), "%u/%u",
-             pg_atomic_read_u32(&Shmem->capture_id), MyClientId);
-    SkipSnap = StatementIndex <= 1 && pg_atomic_read_u32(&Shmem->wal_ready);
+    snprintf(SessionName, sizeof(SessionName), "%u/%u", channel_id(ChanCapture),
+             MyClientId);
+    SkipSnap =
+        StatementIndex <= 1 && pg_atomic_read_u32(&Shmem->capture.wal_ready);
   }
   if (!CaptureLive && !TxOpen) {
     return false;
@@ -134,7 +135,7 @@ static bool capture_gate() {
       session_start(SessionName);
     }
   }
-  if (!CaptureLive && pg_atomic_read_u32(&Shmem->wal_ready)) {
+  if (!CaptureLive && pg_atomic_read_u32(&Shmem->capture.wal_ready)) {
     go_live();
   }
   if (TxOpen) {
@@ -149,9 +150,9 @@ static void tx_finish(bool committed) {
   }
   TxOpen = false;
   bool last = xact_leave_shared(TxGen);
-  if (TxCaptured && is_capture_running() &&
-      MyCaptureGen == get_capture_generation()) {
-    if (!CaptureLive && pg_atomic_read_u32(&Shmem->wal_ready)) {
+  if (TxCaptured && channel_running(ChanCapture) &&
+      MyCaptureGen == channel_generation(ChanCapture)) {
+    if (!CaptureLive && pg_atomic_read_u32(&Shmem->capture.wal_ready)) {
       go_live();
     }
     if (CaptureLive) {
@@ -195,12 +196,12 @@ static void pgr_xact_callback(XactEvent event, void* arg) {
   }
   if (event == XACT_EVENT_COMMIT && IsUserTransaction) {
     trace_end('C');
-    pg_atomic_fetch_add_u64(&Shmem->commits, 1);
+    pg_atomic_fetch_add_u64(&Shmem->stats.commits, 1);
     IsUserTransaction = false;
   }
   if (event == XACT_EVENT_ABORT && IsUserTransaction) {
     trace_end('A');
-    pg_atomic_fetch_add_u64(&Shmem->aborts, 1);
+    pg_atomic_fetch_add_u64(&Shmem->stats.aborts, 1);
     IsUserTransaction = false;
   }
 }
@@ -355,7 +356,7 @@ static void pgr_ProcessUtility_hook(PlannedStmt* pstmt,
     if (IsA(parsetree, TransactionStmt)) {
       TransactionStmt* stmt = (TransactionStmt*)parsetree;
       if (stmt->kind == TRANS_STMT_ROLLBACK) {
-        pg_atomic_fetch_add_u64(&Shmem->rollbacks, 1);
+        pg_atomic_fetch_add_u64(&Shmem->stats.rollbacks, 1);
       }
     }
   }

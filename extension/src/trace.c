@@ -3,7 +3,7 @@
 #include "portability/instr_time.h"
 
 void send_trace_event(char event_type, uint32 duration_us) {
-  if (!Shmem || !is_trace_running()) {
+  if (!Shmem || !channel_running(ChanTrace)) {
     return;
   }
   uint32 index = (uint32)StatementIndex;
@@ -12,8 +12,7 @@ void send_trace_event(char event_type, uint32 duration_us) {
   memcpy(buf + 4, &index, 4);
   memcpy(buf + 8, &duration_us, 4);
   buf[12] = event_type;
-  ring_push(&Shmem->trace_ring, buf, sizeof(buf));
-  wakeup_trace_worker();
+  channel_push(ChanTrace, buf, sizeof(buf));
 }
 
 static instr_time pgr_trace_start_it;
@@ -24,14 +23,14 @@ static uint32 it_diff_us(instr_time start, instr_time end) {
 }
 
 void trace_begin() {
-  if (!is_replay_client() || !is_trace_running()) {
+  if (!is_replay_client() || !channel_running(ChanTrace)) {
     return;
   }
   INSTR_TIME_SET_CURRENT(pgr_trace_start_it);
 }
 
 void trace_end(char event_type) {
-  if (!is_replay_client() || !is_trace_running()) {
+  if (!is_replay_client() || !channel_running(ChanTrace)) {
     return;
   }
   instr_time now;

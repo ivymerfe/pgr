@@ -11,32 +11,37 @@
 
 #include "ring.h"
 
+typedef enum { ChanCapture, ChanTrace, ChanCount } ChannelKind;
+
 typedef struct {
-  pg_atomic_uint32 capture_id;
-  pg_atomic_uint32 capture_running;
-  pg_atomic_uint32 capture_generation;
+  pg_atomic_uint32 id;
+  pg_atomic_uint32 running;
+  pg_atomic_uint32 generation;
+  slock_t lock;
+  int worker_pid;
+  Latch* latch;
+  MpscRing ring;
+} Channel;
+
+typedef struct {
   pg_atomic_uint32 next_client_id;
   pg_atomic_uint32 wal_ready;
-
-  pg_atomic_uint32 session_debug_enabled;
-
   slock_t lock;
   uint32 open_xacts;
   uint32 pending_xacts;
+} CaptureState;
 
-  Latch* capture_worker_latch;
-  MpscRing capture_ring;
-
-  pg_atomic_uint32 trace_id;
-  pg_atomic_uint32 trace_running;
-  pg_atomic_uint32 trace_generation;
-
-  Latch* trace_worker_latch;
-  MpscRing trace_ring;
-
+typedef struct {
   pg_atomic_uint64 commits;
   pg_atomic_uint64 aborts;
   pg_atomic_uint64 rollbacks;
+} ReplayStats;
+
+typedef struct {
+  Channel channels[ChanCount];
+  CaptureState capture;
+  ReplayStats stats;
+  pg_atomic_uint32 session_debug_enabled;
 } SharedMemory;
 
 extern SharedMemory* Shmem;
@@ -64,10 +69,21 @@ enum {
 void setup_hooks();
 void shmem_init();
 
-void register_capture_worker();
-void wakeup_capture_worker();
-
 uint32 reserve_id(const char* subdir, const char* ext);
+
+// channels
+void channels_init();
+
+uint32 channel_start(ChannelKind k);
+void channel_publish(ChannelKind k, uint32 id);
+void channel_stop(ChannelKind k);
+void channel_ensure_worker(ChannelKind k);
+
+bool channel_running(ChannelKind k);
+uint32 channel_generation(ChannelKind k);
+uint32 channel_id(ChannelKind k);
+void channel_wakeup(ChannelKind k);
+bool channel_push(ChannelKind k, const char* data, size_t len);
 
 // session
 
@@ -77,11 +93,7 @@ bool session_active(void);
 int session_restore(const char* name);
 
 // capture
-
 uint32 capture_start();
-void capture_stop();
-bool is_capture_running();
-uint32 get_capture_generation();
 uint32 acquire_client_id();
 
 void capture_txbuf_reset(void);
@@ -109,14 +121,6 @@ bool xact_is_pre(uint32 gen);
 
 void read_replay_client_id(Port* port);
 bool is_replay_client();
-
-void register_trace_worker();
-void wakeup_trace_worker();
-
-uint32 trace_start();
-void trace_stop();
-bool is_trace_running();
-uint32 get_trace_generation();
 
 void send_trace_event(char event_type, uint32 duration_us);
 void trace_begin();

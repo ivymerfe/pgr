@@ -10,6 +10,4 @@ void _PG_init(void) {
     ereport(ERROR, (errmsg("pgr must be loaded via shared_preload_libraries")));
   }
   setup_hooks();
-  register_capture_worker();
-  register_trace_worker();
 }

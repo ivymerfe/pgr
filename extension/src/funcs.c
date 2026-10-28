@@ -24,17 +24,17 @@ Datum sql_capture_start(PG_FUNCTION_ARGS) {
 }
 
 Datum sql_capture_stop(PG_FUNCTION_ARGS) {
-  capture_stop();
+  channel_stop(ChanCapture);
   PG_RETURN_BOOL(true);
 }
 
 Datum sql_trace_start(PG_FUNCTION_ARGS) {
-  uint32 id = trace_start();
+  uint32 id = channel_start(ChanTrace);
   PG_RETURN_INT32(id);
 }
 
 Datum sql_trace_stop(PG_FUNCTION_ARGS) {
-  trace_stop();
+  channel_stop(ChanTrace);
   PG_RETURN_BOOL(true);
 }
 
@@ -52,9 +52,9 @@ Datum sql_get_stats(PG_FUNCTION_ARGS) {
 
     MemoryContextSwitchTo(oldcontext);
   }
-  uint64_t commits = pg_atomic_read_u64(&Shmem->commits);
-  uint64_t rollbacks = pg_atomic_read_u64(&Shmem->rollbacks);
-  uint64_t aborts = pg_atomic_read_u64(&Shmem->aborts);
+  uint64_t commits = pg_atomic_read_u64(&Shmem->stats.commits);
+  uint64_t rollbacks = pg_atomic_read_u64(&Shmem->stats.rollbacks);
+  uint64_t aborts = pg_atomic_read_u64(&Shmem->stats.aborts);
   uint64_t failed_commits = aborts - rollbacks;
 
   bool nulls[3] = {false, false, false};
@@ -67,9 +67,9 @@ Datum sql_get_stats(PG_FUNCTION_ARGS) {
 }
 
 Datum sql_reset_stats(PG_FUNCTION_ARGS) {
-  pg_atomic_write_u64(&Shmem->commits, 0);
-  pg_atomic_write_u64(&Shmem->aborts, 0);
-  pg_atomic_write_u64(&Shmem->rollbacks, 0);
+  pg_atomic_write_u64(&Shmem->stats.commits, 0);
+  pg_atomic_write_u64(&Shmem->stats.aborts, 0);
+  pg_atomic_write_u64(&Shmem->stats.rollbacks, 0);
   PG_RETURN_VOID();
 }
 

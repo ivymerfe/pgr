@@ -62,13 +62,6 @@ static void cap_begin(uint8_t type) {
   cap_u64(GetCurrentTimestamp());
 }
 
-static void ring_send(const char* data, size_t len) {
-  if (!ring_push(&Shmem->capture_ring, data, len)) {
-    ereport(WARNING, (errmsg("pgr: ring full, message dropped")));
-  }
-  wakeup_capture_worker();
-}
-
 static void txbuf_add(const char* data, size_t len) {
   if (!TxBufInit) {
     MemoryContext old = MemoryContextSwitchTo(TopMemoryContext);
@@ -93,7 +86,9 @@ static void cap_end() {
     ereport(WARNING, (errmsg("pgr: capture message dropped, too large")));
   } else if (CaptureBufferPos > 0) {
     if (CaptureLive) {
-      ring_send(CaptureBuffer, CaptureBufferPos);
+      if (!channel_push(ChanCapture, CaptureBuffer, CaptureBufferPos)) {
+        ereport(WARNING, (errmsg("pgr: capture channel full, message dropped")));
+      }
     } else {
       txbuf_add(CaptureBuffer, CaptureBufferPos);
     }
@@ -129,7 +124,9 @@ void capture_go_live(const char* session) {
       uint32_t l;
       memcpy(&l, TxBuf.data + pos, sizeof(l));
       pos += sizeof(l);
-      ring_send(TxBuf.data + pos, l);
+      if (!channel_push(ChanCapture, TxBuf.data + pos, l)) {
+        ereport(WARNING, (errmsg("pgr: capture channel full while writing pending tx")));
+      }
       pos += l;
     }
   }
@@ -139,11 +136,11 @@ void capture_go_live(const char* session) {
 void capture_sync_lsn() {
   cap_begin(MsgTypeLsn);
   cap_u64(GetXLogInsertRecPtr());
-  if (!CaptureOverflow) {
-    ring_send(CaptureBuffer, CaptureBufferPos);
+  if (!channel_push(ChanCapture, CaptureBuffer, CaptureBufferPos)) {
+    ereport(WARNING, (errmsg("pgr: capture channel full, failed to send lsn")));
   }
   CaptureBufferPos = 0;
-  pg_atomic_write_u32(&Shmem->wal_ready, 1);
+  pg_atomic_write_u32(&Shmem->capture.wal_ready, 1);
 }
 
 void capture_disconnect() {

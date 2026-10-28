@@ -6,8 +6,8 @@ project('pgr', 'c',
 fs = import('fs')
 
 sources = files(
-  'src/capture_worker.c',
   'src/capture.c',
+  'src/channel.c',
   'src/funcs.c',
   'src/helpers.c',
   'src/hooks.c',
@@ -16,7 +16,6 @@ sources = files(
   'src/ring.c',
   'src/session.c',
   'src/shmem.c',
-  'src/trace_worker.c',
   'src/trace.c',
 )
 
