@@ -1,6 +1,7 @@
 #include "pgr.h"
 
 #include "access/xact.h"
+#include "catalog/namespace.h"
 #include "executor/executor.h"
 #include "libpq/auth.h"
 #include "miscadmin.h"
@@ -40,14 +41,19 @@ static uint32 TxGen = 0;
 static bool TxCaptured = false;
 static char SessionName[64];
 static bool SkipSnap = false;
-static bool ExitRegistered = false;
 
 static bool IsUserTransaction = false;
 
+static bool ExitRegistered = false;
+static bool ExitLateRegistered = false;
+static bool TempCommitted = false;
+static bool ExitDone = false;
+
 static void pgr_exit(int code, Datum arg) {
-  if (!Shmem) {
+  if (!Shmem || ExitDone) {
     return;
   }
+  ExitDone = true;
   AbortOutOfAnyTransaction();
   if (CaptureLive && is_capture_running() &&
       MyCaptureGen == get_capture_generation()) {
@@ -59,12 +65,25 @@ static void pgr_exit(int code, Datum arg) {
       session_stop();
     }
   }
-  if (MyReplayId != -1 && pg_atomic_read_u32(&Shmem->session_debug_enabled))
-  {
+  if (MyReplayId != -1 && pg_atomic_read_u32(&Shmem->session_debug_enabled)) {
     char session_name[64];
     snprintf(session_name, sizeof(session_name), "r/%d", MyReplayId);
     session_start(session_name);
     session_stop();
+  }
+}
+
+static void ensure_exit_registered(void) {
+  if (!is_replay_client() && !is_capture_running()) {
+    return;
+  }
+  if (!ExitRegistered) {
+    before_shmem_exit(pgr_exit, 0);
+    ExitRegistered = true;
+  }
+  if (TempCommitted && !ExitLateRegistered) {
+    before_shmem_exit(pgr_exit, 1);
+    ExitLateRegistered = true;
   }
 }
 
@@ -99,10 +118,6 @@ static bool capture_gate() {
     CaptureLive = false;
     MyCaptureGen = gen;
     MyClientId = acquire_client_id();
-    if (!ExitRegistered) {
-      before_shmem_exit(pgr_exit, 0);
-      ExitRegistered = true;
-    }
     snprintf(SessionName, sizeof(SessionName), "%u/%u",
              pg_atomic_read_u32(&Shmem->capture_id), MyClientId);
     SkipSnap = StatementIndex <= 1 && pg_atomic_read_u32(&Shmem->wal_ready);
@@ -154,6 +169,11 @@ static void tx_finish(bool committed) {
 static void pgr_xact_callback(XactEvent event, void* arg) {
   if (MyBackendType != B_BACKEND || !Shmem) {
     return;
+  }
+  ensure_exit_registered();
+  if ((event == XACT_EVENT_COMMIT || event == XACT_EVENT_PREPARE) &&
+      OidIsValid(GetTempToastNamespace())) {
+    TempCommitted = true;
   }
   switch (event) {
     case XACT_EVENT_COMMIT:

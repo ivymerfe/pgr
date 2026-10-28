@@ -1,7 +1,8 @@
-from tests.base import *
-from concurrent.futures import ThreadPoolExecutor
 import random
 import sys
+
+from tests.base import *
+from tests.sessions import compare_sessions
 
 JAR = "./tests/bench.jar"
 CLASS = "tests.roznica.TempCatalogRoznicaLike"
@@ -14,6 +15,7 @@ CAPTURE_DELAY_MAX = 1
 
 def main():
     open('pg.log', 'w').close()
+    psql("select pgr.sdebug(true);")
 
     print("starting bench")
     bench = subprocess.Popen(
@@ -43,7 +45,11 @@ def main():
 
     if replay(capture_path) != 0:
         print("replay failed")
+        psql("select pgr.sdebug(false);")
         return 2
+    
+    psql("select pgr.sdebug(false);")
+    compare_sessions()
 
     return 0 
 
