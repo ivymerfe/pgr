@@ -215,6 +215,7 @@ void capture_sync() {
 }
 
 void capture_tx_end(bool committed) {
+  return;
   cap_begin(MsgTypeTxEnd);
   cap_u8(committed);
   cap_u32(GetTopTransactionIdIfAny());
