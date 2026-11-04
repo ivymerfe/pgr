@@ -123,6 +123,7 @@ bool xact_is_pre(uint32 gen);
 void init_stats();
 uint64_t stats_statements();
 void stats_add_statement();
+void stats_add_statements(uint64_t count);
 uint64_t stats_commits();
 void stats_add_commit();
 uint64_t stats_rollbacks();

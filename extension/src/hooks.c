@@ -50,6 +50,8 @@ static bool ExitLateRegistered = false;
 static bool TempCommitted = false;
 static bool ExitDone = false;
 
+static int LastTxStatementCount = 0;
+
 static void pgr_exit(int code, Datum arg) {
   if (!Shmem || ExitDone) {
     return;
@@ -93,6 +95,7 @@ static void go_live() {
   bool ok = session_active();
   session_stop();
   capture_go_live(ok ? SessionName : "");
+  stats_add_statements(LastTxStatementCount);
 }
 
 static bool capture_gate() {
@@ -105,6 +108,7 @@ static bool capture_gate() {
     TxCaptured = false;
     if (!CaptureLive) {
       capture_txbuf_reset();
+      LastTxStatementCount = 0;
     }
   }
   if (!channel_running(ChanCapture)) {
@@ -117,6 +121,7 @@ static bool capture_gate() {
   if (MyCaptureGen != gen) {
     session_stop();
     capture_txbuf_reset();
+    LastTxStatementCount = 0;
     CaptureLive = false;
     MyCaptureGen = gen;
     MyClientId = acquire_client_id();
@@ -125,6 +130,7 @@ static bool capture_gate() {
     SkipSnap =
         StatementIndex <= 1 && pg_atomic_read_u32(&Shmem->capture.wal_ready);
   }
+  LastTxStatementCount += 1;
   if (!CaptureLive && !TxOpen) {
     return false;
   }
@@ -162,6 +168,7 @@ static void tx_finish(bool committed) {
   }
   if (!CaptureLive) {
     capture_txbuf_reset();
+    LastTxStatementCount = 0;
   }
   TxCaptured = false;
   if (last) {

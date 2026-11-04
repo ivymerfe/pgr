@@ -20,16 +20,21 @@ void shmem_init() {
 uint32 capture_start() {
   uint32 id = reserve_id("captures", "pr");
   CaptureState* c = &Shmem->capture;
+  bool nothing_pending;
 
   SpinLockAcquire(&c->lock);
   pg_atomic_write_u32(&c->wal_ready, 0);
   pg_atomic_write_u32(&c->next_client_id, 0);
   c->pending_xacts = c->open_xacts;
+  nothing_pending = c->pending_xacts == 0;
   channel_publish(ChanCapture, id);
   SpinLockRelease(&c->lock);
 
   channel_ensure_worker(ChanCapture);
   channel_wakeup(ChanCapture);
+  if (nothing_pending) {
+    capture_sync_lsn();
+  }
   return id;
 }
 
@@ -83,6 +88,10 @@ void stats_add_statement() {
   if (should_record_stats()) {
     pg_atomic_fetch_add_u64(&Shmem->stats.statements, 1);
   }
+}
+
+void stats_add_statements(uint64_t count) {
+  pg_atomic_fetch_add_u64(&Shmem->stats.statements, count);
 }
 
 uint64_t stats_commits() {

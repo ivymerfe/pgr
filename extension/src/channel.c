@@ -111,9 +111,11 @@ PGDLLEXPORT void channel_worker_main(Datum main_arg) {
 
   while (!ShutdownRequestPending) {
     uint32 gen = channel_generation(k);
-    if (WorkerGeneration != gen || !channel_running(k)) {
-      write_events(k);
+    if (WorkerGeneration != gen) {
+      close_file();
       WorkerGeneration = gen;
+    } else if (!channel_running(k) && File != NULL) {
+      write_events(k);
       close_file();
     }
     if (Descs[k].open_on == 0 && channel_running(k) && File == NULL) {
