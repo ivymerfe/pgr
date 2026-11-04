@@ -21,7 +21,6 @@ use crate::utils::{ReplayStats, Stream};
 const WAKER_TOKEN: Token = Token(usize::MAX);
 const HORIZON_US: u64 = 1_000_000;
 const IDLE_POLL_US: u64 = 5_000;
-const DECAY_RATE: f64 = 1.0;
 
 pub const READ_BUF_SIZE: usize = 65536;
 
@@ -108,6 +107,7 @@ pub struct ReplayLoop {
     slots: HashMap<ClientId, Slot>,
     timers: BinaryHeap<Reverse<(u64, ClientId)>>,
 
+    catchup: f64,
     shift: u64,
     last_tick: u64,
 
@@ -127,6 +127,7 @@ impl ReplayLoop {
         let waker = Arc::new(mio::Waker::new(poll.registry(), WAKER_TOKEN)?);
         let server_addr = socket2::SockAddr::from(config.server);
 
+        let catchup = config.catchup.max(0.0);
         Ok(Self {
             config,
             server_addr,
@@ -141,6 +142,7 @@ impl ReplayLoop {
             last_ts: 0,
             slots: HashMap::new(),
             timers: BinaryHeap::new(),
+            catchup,
             shift: 0,
             last_tick: 0,
             lag_sum: 0,
@@ -158,12 +160,12 @@ impl ReplayLoop {
         self.start.map_or(0, |s| s.elapsed().as_micros() as u64)
     }
 
-    fn decay(&mut self, now: u64) {
+    fn catch_up(&mut self, now: u64) {
         if self.shift == 0 {
             self.last_tick = now;
             return;
         }
-        let d = (now.saturating_sub(self.last_tick) as f64 * DECAY_RATE) as u64;
+        let d = (now.saturating_sub(self.last_tick) as f64 * self.catchup) as u64;
         if d > 0 {
             self.shift = self.shift.saturating_sub(d);
             self.last_tick = now;
@@ -174,7 +176,7 @@ impl ReplayLoop {
         let now = self.now_us();
         let mut t = self.timers.peek().map(|Reverse((ts, _))| {
             let wait = (ts + self.shift).saturating_sub(now);
-            (wait as f64 / (1.0 + DECAY_RATE)) as u64
+            (wait as f64 / (1.0 + self.catchup)) as u64
         });
         if let Some(c) = &self.lookahead {
             let d = c.ts.saturating_sub(HORIZON_US).saturating_sub(now);
@@ -300,7 +302,7 @@ impl ReplayLoop {
 
     fn dispatch_ready(&mut self) {
         let now = self.now_us();
-        self.decay(now);
+        self.catch_up(now);
         while let Some(&Reverse((ts, id))) = self.timers.peek() {
             if ts + self.shift > now {
                 break;
@@ -425,7 +427,7 @@ impl ReplayLoop {
         }
         let id = token.0 as ClientId;
         let now = self.now_us();
-        self.decay(now);
+        self.catch_up(now);
         let fallback = self.config.server;
         let Some(slot) = self.slots.get_mut(&id) else {
             return;

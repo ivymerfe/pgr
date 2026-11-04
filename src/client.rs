@@ -16,6 +16,8 @@ pub struct ReplayConfig {
     pub password: Option<String>,
     pub dbname: String,
     pub application_name: String,
+    pub speed: f64,
+    pub catchup: f64,
 }
 
 #[derive(PartialEq)]
@@ -32,6 +34,8 @@ impl ReplayConfig {
         dbname: String,
         user: String,
         password: Option<String>,
+        speed: f64,
+        catchup: f64,
     ) -> Self {
         ReplayConfig {
             server: SocketAddr::new(host, port),
@@ -39,6 +43,8 @@ impl ReplayConfig {
             password,
             dbname,
             application_name: "pgr".to_string(),
+            speed,
+            catchup
         }
     }
 }

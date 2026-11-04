@@ -105,8 +105,8 @@ def remove_debug_sessions():
         shutil.rmtree(replay_sessions)
 
 
-def replay(capture_path):
-    return subprocess.run([PGR, "replay", capture_path]).returncode
+def replay(capture_path, speed=1.0):
+    return subprocess.run([PGR, "replay", capture_path, "-s", str(speed)]).returncode
 
 
 def compare_timings(capture_path, timings_path):

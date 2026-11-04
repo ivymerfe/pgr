@@ -20,7 +20,11 @@ USER = "yami"
 
 
 def roznica_main(
-    test_time: float, num_workers: int, cap_delay_min: float, cap_delay_max: float
+    test_time: float,
+    num_workers: int,
+    cap_delay_min: float,
+    cap_delay_max: float,
+    replay_speed: float,
 ):
     open("pg.log", "w").close()
 
@@ -57,7 +61,7 @@ def roznica_main(
     timings_path = start_timings()
     print_stats()
 
-    if replay(capture_path) != 0:
+    if replay(capture_path, replay_speed) != 0:
         print("replay failed")
         stop_timings()
         disable_debug_sessions()

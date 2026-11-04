@@ -58,6 +58,22 @@ enum Commands {
 
         #[arg(short = 'P', long, help = "Password")]
         pass: Option<String>,
+
+        #[arg(
+            short,
+            long,
+            default_value_t = 1.0,
+            help = "Playback speed multiplier; shrinks client think time (2.0 = twice as fast)"
+        )]
+        speed: f64,
+
+        #[arg(
+            short,
+            long,
+            default_value_t = 1.0,
+            help = "Extra speed while replay lags behind the capture (0 = off, 1.0 = 2x until caught up)"
+        )]
+        catchup: f64,
     },
     #[command(about = "Dump a capture to CSV")]
     Dump {
@@ -143,6 +159,8 @@ fn run_command(cli: Cli) -> anyhow::Result<()> {
             dbname,
             user,
             pass,
+            speed,
+            catchup,
         } => {
             let file = try_open(&input)?;
             let reader = CaptureReader::new(file)?;
@@ -150,7 +168,7 @@ fn run_command(cli: Cli) -> anyhow::Result<()> {
                 "Replaying {} -> {host}:{port} dbname={dbname} user={user}",
                 input.display()
             );
-            let config = ReplayConfig::new(host, port, dbname, user, pass);
+            let config = ReplayConfig::new(host, port, dbname, user, pass, speed, catchup);
             let mut mgr = ReplayManager::new();
             mgr.replay(config, reader)?;
         }

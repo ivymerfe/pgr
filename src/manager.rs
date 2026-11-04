@@ -192,6 +192,7 @@ impl ReplayManager {
 
         let (cmd_tx, cmd_rx) = bounded::<ConnCommand>(QUEUE_CAP);
 
+        let speed = config.speed.max(0.01);
         let mut conn = ReplayLoop::new(config, cmd_rx, stats)?;
         let waker = conn.waker();
         let conn_handle = std::thread::spawn(move || conn.run());
@@ -208,7 +209,7 @@ impl ReplayManager {
         while out.ok {
             match reader.read_event() {
                 Ok(Some(msg)) => {
-                    let rel = msg.ts.saturating_sub(base).max(last);
+                    let rel = ((msg.ts.saturating_sub(base) as f64 / speed) as u64).max(last);
                     last = rel;
                     emit(msg, rel, &mut out);
                 }
