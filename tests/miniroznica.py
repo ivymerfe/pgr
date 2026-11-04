@@ -54,15 +54,19 @@ def main():
     capture_path = start_capture()
 
     bench.wait()
+
     stop_capture()
 
     timings_path = start_timings()
+    print_stats()
 
     if replay(capture_path) != 0:
         print("replay failed")
         stop_timings()
         disable_debug_sessions()
         return 2
+
+    print_stats()
 
     stop_timings()
     disable_debug_sessions()

@@ -14,7 +14,7 @@ CAPTURE_DELAY_MAX = 1
 
 
 def main():
-    open('pg.log', 'w').close()
+    open("pg.log", "w").close()
 
     remove_debug_sessions()
     enable_debug_sessions()
@@ -43,23 +43,27 @@ def main():
     capture_path = start_capture()
 
     bench.wait()
+
     stop_capture()
 
-    timings_path = start_timings();
+    timings_path = start_timings()
+    print_stats()
 
     if replay(capture_path) != 0:
         print("replay failed")
-        stop_timings();
+        stop_timings()
         disable_debug_sessions()
         return 2
 
-    stop_timings();
+    print_stats()
+
+    stop_timings()
     disable_debug_sessions()
-    
+
     compare_timings(capture_path, timings_path)
     compare_sessions()
 
-    return 0 
+    return 0
 
 
 if __name__ == "__main__":

@@ -96,7 +96,7 @@ static void go_live() {
 }
 
 static bool capture_gate() {
-  if (MyBackendType != B_BACKEND) {
+  if (MyBackendType != B_BACKEND || ClientIsPsql) {
     return false;
   }
   if (!TxOpen && IsTransactionState()) {
@@ -189,20 +189,17 @@ static void pgr_xact_callback(XactEvent event, void* arg) {
     default:
       break;
   }
-  if (!is_replay_client()) {
-    return;
-  }
   if (event == XACT_EVENT_PRE_COMMIT && IsUserTransaction) {
     trace_begin();
   }
   if (event == XACT_EVENT_COMMIT && IsUserTransaction) {
     trace_end('C');
-    pg_atomic_fetch_add_u64(&Shmem->stats.commits, 1);
+    stats_add_commit();
     IsUserTransaction = false;
   }
   if (event == XACT_EVENT_ABORT && IsUserTransaction) {
     trace_end('A');
-    pg_atomic_fetch_add_u64(&Shmem->stats.aborts, 1);
+    stats_add_abort();
     IsUserTransaction = false;
   }
 }
@@ -211,6 +208,7 @@ static void pgr_exec_parse_message_hook(const char* query_string,
                                         const char* stmt_name,
                                         Oid* paramTypes,
                                         int numParams) {
+  stats_add_statement();
   send_timing_event(MsgTypeParse);
   if (prev_exec_parse_message_hook) {
     prev_exec_parse_message_hook(query_string, stmt_name, paramTypes,
@@ -223,6 +221,7 @@ static void pgr_exec_parse_message_hook(const char* query_string,
 }
 
 static void pgr_exec_simple_query_hook(const char* query_string) {
+  stats_add_statement();
   send_timing_event(MsgTypeSimpleQuery);
   if (prev_exec_simple_query_hook) {
     prev_exec_simple_query_hook(query_string);
@@ -241,6 +240,7 @@ static void pgr_exec_bind_message_hook(const char* portal_name,
                                        int16* rformats,
                                        int numParams,
                                        ParamListInfo params) {
+  stats_add_statement();
   send_timing_event(MsgTypeBind);
   if (prev_exec_bind_message_hook) {
     prev_exec_bind_message_hook(portal_name, stmt_name, numPFormats, pformats,
@@ -255,6 +255,7 @@ static void pgr_exec_bind_message_hook(const char* portal_name,
 
 static void pgr_exec_execute_message_hook(const char* portal_name,
                                           long max_rows) {
+  stats_add_statement();
   send_timing_event(MsgTypeExecute);
   if (prev_exec_execute_message_hook) {
     prev_exec_execute_message_hook(portal_name, max_rows);
@@ -266,6 +267,7 @@ static void pgr_exec_execute_message_hook(const char* portal_name,
 }
 
 static void pgr_pq_msg_sync_hook() {
+  stats_add_statement();
   send_timing_event(MsgTypeSync);
   if (prev_pq_msg_sync_hook) {
     prev_pq_msg_sync_hook();
@@ -276,6 +278,7 @@ static void pgr_pq_msg_sync_hook() {
 }
 
 static void pgr_pq_msg_close_hook(int close_type, const char* close_target) {
+  stats_add_statement();
   send_timing_event(MsgTypeClose);
   if (prev_pq_msg_close_hook) {
     prev_pq_msg_close_hook(close_type, close_target);
@@ -289,7 +292,7 @@ static void pgr_ClientAuthentication_hook(struct Port* port, int status) {
   if (prev_ClientAuthentication) {
     prev_ClientAuthentication(port, status);
   }
-  read_replay_client_id(port);
+  read_client_info(port);
   send_timing_event(MsgTypeConnect);
 }
 
@@ -359,12 +362,12 @@ static void pgr_ProcessUtility_hook(PlannedStmt* pstmt,
                                     DestReceiver* dest,
                                     QueryCompletion* qc) {
   IsUserTransaction = true;
-  if (is_replay_client() && IsTransactionBlock()) {
+  if (IsTransactionBlock()) {
     Node* parsetree = pstmt->utilityStmt;
     if (IsA(parsetree, TransactionStmt)) {
       TransactionStmt* stmt = (TransactionStmt*)parsetree;
       if (stmt->kind == TRANS_STMT_ROLLBACK) {
-        pg_atomic_fetch_add_u64(&Shmem->stats.rollbacks, 1);
+        stats_add_rollback();
       }
     }
   }

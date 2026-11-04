@@ -32,7 +32,7 @@ def psql(sql):
 
 
 def start_capture() -> str:
-    id = int(psql("select pgr.cstart()"))
+    id = int(psql("select pgr.cstart(true)"))
     path = f"{DATA}/captures/{id}.pr"
     print(f"capture id = {id}, path = {path}")
     return path
@@ -55,6 +55,35 @@ def stop_timings():
     psql("select pgr.timestop()")
 
 
+def get_stats(reset=True):
+    reset_str = "true" if reset else "false"
+    out = psql(
+        f"SELECT statements, commits, rollbacks, failed_commits FROM pgr.getstats({reset_str})"
+    )
+
+    if not out.strip():
+        return None
+
+    # psql with -A and -t separates columns with '|'
+    parts = out.strip().split("|")
+    return tuple(int(p) for p in parts)
+
+
+def print_stats(reset=True):
+    stats = get_stats(reset=reset)
+    if not stats:
+        print("No stats")
+        return
+
+    statements, commits, rollbacks, failed_commits = stats
+    print(f"--- Stats ---")
+    print(f"  Statements     : {statements}")
+    print(f"  Commits        : {commits}")
+    print(f"  Rollbacks      : {rollbacks}")
+    print(f"  Failed Commits : {failed_commits}")
+    print("-" * 30)
+
+
 def enable_debug_sessions():
     print("enabling debug sessions")
     psql("select pgr.sdebug(true);")
@@ -67,8 +96,8 @@ def disable_debug_sessions():
 
 def remove_debug_sessions():
     print("removing old sessions")
-    orig_sessions = os.path.join(DATA, 'sessions', 'd')
-    replay_sessions = os.path.join(DATA, 'sessions', 'r')
+    orig_sessions = os.path.join(DATA, "sessions", "d")
+    replay_sessions = os.path.join(DATA, "sessions", "r")
 
     if os.path.exists(orig_sessions):
         shutil.rmtree(orig_sessions)

@@ -8,11 +8,11 @@ fs = import('fs')
 sources = files(
   'src/capture.c',
   'src/channel.c',
+  'src/client_info.c',
   'src/funcs.c',
   'src/helpers.c',
   'src/hooks.c',
   'src/init.c',
-  'src/replay_id.c',
   'src/ring.c',
   'src/session.c',
   'src/shmem.c',

@@ -32,6 +32,7 @@ typedef struct {
 } CaptureState;
 
 typedef struct {
+  pg_atomic_uint64 statements;
   pg_atomic_uint64 commits;
   pg_atomic_uint64 aborts;
   pg_atomic_uint64 rollbacks;
@@ -51,6 +52,7 @@ extern uint32 MyClientId;
 extern bool CaptureLive;
 
 extern int32 MyReplayId;
+extern bool ClientIsPsql;
 extern uint64 StatementIndex;
 
 enum {
@@ -117,9 +119,21 @@ uint32 xact_enter_shared();
 bool xact_leave_shared(uint32 gen);
 bool xact_is_pre(uint32 gen);
 
+// stats
+void init_stats();
+uint64_t stats_statements();
+void stats_add_statement();
+uint64_t stats_commits();
+void stats_add_commit();
+uint64_t stats_rollbacks();
+void stats_add_rollback();
+uint64_t stats_aborts();
+void stats_add_abort();
+void reset_stats();
+
 // replay analysis
 
-void read_replay_client_id(Port* port);
+void read_client_info(Port* port);
 bool is_replay_client();
 
 void send_trace_event(char event_type, uint32 duration_us);

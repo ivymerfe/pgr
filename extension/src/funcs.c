@@ -15,7 +15,6 @@ PG_FUNCTION_INFO_V1(sql_time_start);
 PG_FUNCTION_INFO_V1(sql_time_stop);
 
 PG_FUNCTION_INFO_V1(sql_get_stats);
-PG_FUNCTION_INFO_V1(sql_reset_stats);
 
 PG_FUNCTION_INFO_V1(sql_session_dump);
 PG_FUNCTION_INFO_V1(sql_session_restore);
@@ -23,30 +22,35 @@ PG_FUNCTION_INFO_V1(sql_session_debug);
 
 Datum sql_capture_start(PG_FUNCTION_ARGS) {
   uint32 id = capture_start();
+  if (!PG_ARGISNULL(0)) {
+    if (PG_GETARG_BOOL(0)) {
+      reset_stats();
+    }
+  }
   PG_RETURN_INT32(id);
 }
 
-Datum sql_capture_stop(PG_FUNCTION_ARGS) {
+Datum sql_capture_stop(__attribute__((unused)) PG_FUNCTION_ARGS) {
   channel_stop(ChanCapture);
   PG_RETURN_BOOL(true);
 }
 
-Datum sql_trace_start(PG_FUNCTION_ARGS) {
+Datum sql_trace_start(__attribute__((unused)) PG_FUNCTION_ARGS) {
   uint32 id = channel_start(ChanTrace);
   PG_RETURN_INT32(id);
 }
 
-Datum sql_trace_stop(PG_FUNCTION_ARGS) {
+Datum sql_trace_stop(__attribute__((unused)) PG_FUNCTION_ARGS) {
   channel_stop(ChanTrace);
   PG_RETURN_BOOL(true);
 }
 
-Datum sql_time_start(PG_FUNCTION_ARGS) {
+Datum sql_time_start(__attribute__((unused)) PG_FUNCTION_ARGS) {
   uint32 id = channel_start(ChanTiming);
   PG_RETURN_INT32(id);
 }
 
-Datum sql_time_stop(PG_FUNCTION_ARGS) {
+Datum sql_time_stop(__attribute__((unused)) PG_FUNCTION_ARGS) {
   channel_stop(ChanTiming);
   PG_RETURN_BOOL(true);
 }
@@ -65,25 +69,19 @@ Datum sql_get_stats(PG_FUNCTION_ARGS) {
 
     MemoryContextSwitchTo(oldcontext);
   }
-  uint64_t commits = pg_atomic_read_u64(&Shmem->stats.commits);
-  uint64_t rollbacks = pg_atomic_read_u64(&Shmem->stats.rollbacks);
-  uint64_t aborts = pg_atomic_read_u64(&Shmem->stats.aborts);
-  uint64_t failed_commits = aborts - rollbacks;
-
-  bool nulls[3] = {false, false, false};
+  bool nulls[4] = {false, false, false, false};
   Datum values[4];
-  values[0] = Int64GetDatum(commits);
-  values[1] = Int64GetDatum(rollbacks);
-  values[2] = Int64GetDatum(failed_commits);
+  values[0] = Int64GetDatum(stats_statements());
+  values[1] = Int64GetDatum(stats_commits());
+  values[2] = Int64GetDatum(stats_rollbacks());
+  values[3] = Int64GetDatum(stats_aborts() - stats_rollbacks());
+  if (!PG_ARGISNULL(0)) {
+    if (PG_GETARG_BOOL(0)) {
+      reset_stats();
+    }
+  }
 
   PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
-}
-
-Datum sql_reset_stats(PG_FUNCTION_ARGS) {
-  pg_atomic_write_u64(&Shmem->stats.commits, 0);
-  pg_atomic_write_u64(&Shmem->stats.aborts, 0);
-  pg_atomic_write_u64(&Shmem->stats.rollbacks, 0);
-  PG_RETURN_VOID();
 }
 
 Datum sql_session_dump(PG_FUNCTION_ARGS) {

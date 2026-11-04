@@ -1,8 +1,9 @@
 #include "pgr.h"
 
 int32 MyReplayId = -1;
+bool ClientIsPsql = false;
 
-void read_replay_client_id(Port* port) {
+void read_client_info(Port* port) {
   ListCell* lc;
   for (lc = list_head(port->guc_options); lc != NULL;
        lc = lnext(port->guc_options, lc)) {
@@ -15,6 +16,12 @@ void read_replay_client_id(Port* port) {
     }
 
     value = (char*)lfirst(lc2);
+
+    if (strcmp(name, "application_name") == 0) {
+      if (strcmp(value, "psql") == 0) {
+        ClientIsPsql = true;
+      }
+    }
 
     if (strcmp(name, "pgr.client_id") == 0) {
       char* endptr;

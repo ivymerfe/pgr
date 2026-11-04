@@ -14,9 +14,7 @@ void shmem_init() {
 
   pg_atomic_init_u32(&Shmem->session_debug_enabled, 0);
 
-  pg_atomic_init_u64(&Shmem->stats.commits, 0);
-  pg_atomic_init_u64(&Shmem->stats.aborts, 0);
-  pg_atomic_init_u64(&Shmem->stats.rollbacks, 0);
+  init_stats();
 }
 
 uint32 capture_start() {
@@ -64,4 +62,62 @@ bool xact_leave_shared(uint32 gen) {
 
 bool xact_is_pre(uint32 gen) {
   return channel_running(ChanCapture) && gen != channel_generation(ChanCapture);
+}
+
+void init_stats() {
+  pg_atomic_init_u64(&Shmem->stats.statements, 0);
+  pg_atomic_init_u64(&Shmem->stats.commits, 0);
+  pg_atomic_init_u64(&Shmem->stats.aborts, 0);
+  pg_atomic_init_u64(&Shmem->stats.rollbacks, 0);
+}
+
+static bool should_record_stats() {
+  return (is_replay_client() || CaptureLive) && !ClientIsPsql;
+}
+
+uint64_t stats_statements() {
+  return pg_atomic_read_u64(&Shmem->stats.statements);
+}
+
+void stats_add_statement() {
+  if (should_record_stats()) {
+    pg_atomic_fetch_add_u64(&Shmem->stats.statements, 1);
+  }
+}
+
+uint64_t stats_commits() {
+  return pg_atomic_read_u64(&Shmem->stats.commits);
+}
+
+void stats_add_commit() {
+  if (should_record_stats()) {
+    pg_atomic_fetch_add_u64(&Shmem->stats.commits, 1);
+  }
+}
+
+uint64_t stats_rollbacks() {
+  return pg_atomic_read_u64(&Shmem->stats.rollbacks);
+}
+
+void stats_add_rollback() {
+  if (should_record_stats()) {
+    pg_atomic_fetch_add_u64(&Shmem->stats.rollbacks, 1);
+  }
+}
+
+uint64_t stats_aborts() {
+  return pg_atomic_read_u64(&Shmem->stats.aborts);
+}
+
+void stats_add_abort() {
+  if (should_record_stats()) {
+    pg_atomic_fetch_add_u64(&Shmem->stats.aborts, 1);
+  }
+}
+
+void reset_stats() {
+  pg_atomic_write_u64(&Shmem->stats.statements, 0);
+  pg_atomic_write_u64(&Shmem->stats.commits, 0);
+  pg_atomic_write_u64(&Shmem->stats.aborts, 0);
+  pg_atomic_write_u64(&Shmem->stats.rollbacks, 0);
 }

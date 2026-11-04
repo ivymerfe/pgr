@@ -1,6 +1,8 @@
-CREATE OR REPLACE FUNCTION pgr.cstart() RETURNS int
+CREATE OR REPLACE FUNCTION pgr.cstart(
+    reset_stats boolean DEFAULT false
+) RETURNS int
 AS 'MODULE_PATHNAME', 'sql_capture_start'
-LANGUAGE C STRICT PARALLEL SAFE;
+LANGUAGE C PARALLEL SAFE;
 
 CREATE OR REPLACE FUNCTION pgr.cstop() RETURNS boolean
 AS 'MODULE_PATHNAME', 'sql_capture_stop'
@@ -23,17 +25,14 @@ AS 'MODULE_PATHNAME', 'sql_time_stop'
 LANGUAGE C STRICT PARALLEL SAFE;
 
 CREATE OR REPLACE FUNCTION pgr.getstats(
+    reset_stats boolean DEFAULT false,
+    OUT statements bigint,
     OUT commits bigint,
     OUT rollbacks bigint,
     OUT failed_commits bigint
 )
 AS 'MODULE_PATHNAME', 'sql_get_stats'
-LANGUAGE C STRICT PARALLEL SAFE;
-
-CREATE OR REPLACE FUNCTION pgr.resetstats()
-RETURNS void
-AS 'MODULE_PATHNAME', 'sql_reset_stats'
-LANGUAGE C STRICT PARALLEL SAFE;
+LANGUAGE C PARALLEL SAFE;
 
 CREATE OR REPLACE FUNCTION pgr.sdump(p_name text) RETURNS int
 AS 'MODULE_PATHNAME', 'sql_session_dump'
