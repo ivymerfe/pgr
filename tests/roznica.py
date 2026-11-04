@@ -1,19 +1,27 @@
 import random
-import sys
 
 from tests.base import *
 from tests.sessions import compare_sessions
 
+TABLES = [
+    "registry_data",
+    "reference_contractors",
+    "reference_types",
+    "reference_exclusions",
+    "reference_table_vt",
+    "reference_documents",
+    "reference_access_groups_vt",
+    "access_registry",
+    # "accumulation_register_products",
+]
 JAR = "./tests/bench.jar"
 CLASS = "tests.roznica.TempCatalogRoznicaLike"
 USER = "yami"
-TIME = 2
-NUM_WORKERS = 1
-CAPTURE_DELAY_MIN = 1
-CAPTURE_DELAY_MAX = 1
 
 
-def main():
+def roznica_main(
+    test_time: float, num_workers: int, cap_delay_min: float, cap_delay_max: float
+):
     open("pg.log", "w").close()
 
     remove_debug_sessions()
@@ -31,14 +39,14 @@ def main():
             "-U",
             USER,
             "-w",
-            str(NUM_WORKERS),
+            str(num_workers),
             "-t",
-            str(TIME),
+            str(test_time),
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    time.sleep(random.uniform(CAPTURE_DELAY_MIN, CAPTURE_DELAY_MAX))
+    time.sleep(random.uniform(cap_delay_min, cap_delay_max))
 
     capture_path = start_capture()
 
@@ -64,7 +72,3 @@ def main():
     compare_sessions()
 
     return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
