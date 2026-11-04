@@ -1,7 +1,6 @@
 use std::{sync::Arc, thread::sleep, time::Duration};
 
-use crossbeam_channel::{Sender, unbounded};
-use quanta::Instant;
+use crossbeam_channel::{Sender, TrySendError, bounded};
 use tracing::{error, info};
 
 use crate::{
@@ -12,7 +11,8 @@ use crate::{
     utils::ReplayStats,
 };
 
-const WAKE_BATCH: u32 = 256;
+const WAKE_BATCH: u32 = 128;
+const QUEUE_CAP: usize = 16384;
 
 struct Sink<'a> {
     tx: &'a Sender<ConnCommand>,
@@ -23,15 +23,28 @@ struct Sink<'a> {
 
 impl Sink<'_> {
     fn push(&mut self, cmd: ConnCommand) {
+        let cmd = match self.tx.try_send(cmd) {
+            Ok(()) => {
+                self.unwoken += 1;
+                if self.unwoken >= WAKE_BATCH {
+                    self.wake();
+                }
+                return;
+            }
+            Err(TrySendError::Full(c)) => c,
+            Err(TrySendError::Disconnected(_)) => {
+                error!("ctl thread gone, dropping command");
+                self.ok = false;
+                return;
+            }
+        };
+        self.wake();
         if self.tx.send(cmd).is_err() {
             error!("ctl thread gone, dropping command");
             self.ok = false;
             return;
         }
         self.unwoken += 1;
-        if self.unwoken >= WAKE_BATCH {
-            self.wake();
-        }
     }
 
     fn wake(&mut self) {
@@ -75,7 +88,7 @@ fn emit(msg: CaptureMessage, ts: u64, out: &mut Sink) {
     let (tag, data) = match msg.event {
         ClientEvent::Lsn { .. } | ClientEvent::TxEnd { .. } => return,
         ClientEvent::Connect { session_id } => {
-            out.push(ConnCommand::Connect { id, ts });
+            out.push(ConnCommand::connect(id, ts));
             if session_id.is_empty() {
                 return;
             }
@@ -148,7 +161,7 @@ fn emit(msg: CaptureMessage, ts: u64, out: &mut Sink) {
             (proto::F_CLOSE, end(v))
         }
     };
-    out.push(ConnCommand::Send { id, ts, tag, data });
+    out.push(ConnCommand::send(id, ts, tag, data));
 }
 
 pub struct ReplayManager {}
@@ -177,7 +190,7 @@ impl ReplayManager {
             }
         });
 
-        let (cmd_tx, cmd_rx) = unbounded::<ConnCommand>();
+        let (cmd_tx, cmd_rx) = bounded::<ConnCommand>(QUEUE_CAP);
 
         let mut conn = ReplayLoop::new(config, cmd_rx, stats)?;
         let waker = conn.waker();
@@ -192,19 +205,12 @@ impl ReplayManager {
 
         let base = reader.start_ts;
         let mut last = 0u64;
-        let start = Instant::now();
         while out.ok {
             match reader.read_event() {
                 Ok(Some(msg)) => {
                     let rel = msg.ts.saturating_sub(base).max(last);
                     last = rel;
                     emit(msg, rel, &mut out);
-                    if rel.saturating_sub(start.elapsed().as_micros() as u64) > 1_000_000 {
-                        out.wake();
-                        while rel.saturating_sub(start.elapsed().as_micros() as u64) > 1_000_000 {
-                            sleep(Duration::from_millis(500));
-                        }
-                    }
                 }
                 Ok(None) => break,
                 Err(e) => {
@@ -213,7 +219,6 @@ impl ReplayManager {
                 }
             }
         }
-        out.push(ConnCommand::Terminate { ts: last });
         out.wake();
         drop(out);
         drop(cmd_tx);

@@ -43,11 +43,6 @@ impl ReplayConfig {
     }
 }
 
-struct PendingFrameData {
-    tag: u8,
-    data: Vec<u8>,
-}
-
 pub struct ReplayClient {
     pub id: ClientId,
     pub config: ReplayConfig,
@@ -56,10 +51,10 @@ pub struct ReplayClient {
 
     parse_stream: Stream,
     outbox: Stream,
-    pre_connect_frames: Vec<PendingFrameData>,
 
     pub state: ClientState,
     sent_terminate: bool,
+    pub rfq: bool,
 
     start: Instant,
     req_index: u32,
@@ -93,9 +88,9 @@ impl ReplayClient {
             stats,
             parse_stream: Stream::new(65536),
             outbox: Stream::new(65536),
-            pre_connect_frames: Vec::new(),
             state: ClientState::Connecting,
             sent_terminate: false,
+            rfq: false,
             start: Instant::now(),
             req_index: 0,
             resp_index: 0,
@@ -137,10 +132,7 @@ impl ReplayClient {
                         info!("[{}] connected: {}", self.id, self.addr);
                         self.state = ClientState::Normal;
                         self.start = Instant::now();
-                        let frames = std::mem::take(&mut self.pre_connect_frames);
-                        for frame in frames {
-                            self.replay_frame(frame.tag, &frame.data);
-                        }
+                        self.rfq = true;
                     }
                     _ => {}
                 },
@@ -151,6 +143,7 @@ impl ReplayClient {
             ClientState::Normal => {
                 match proto::parse_message(tag, data) {
                     Ok(msg) => match msg {
+                        BackendMessage::ReadyForQuery => self.rfq = true,
                         BackendMessage::ErrorResponse(e) => {
                             error!(
                                 "[{}] server error: code={:?}, message={}, detail={:?}, hint={:?}",
@@ -178,18 +171,11 @@ impl ReplayClient {
     }
 
     pub fn replay_frame(&mut self, tag: u8, data: &[u8]) {
-        if self.state == ClientState::Dead {
+        if self.state != ClientState::Normal {
             return;
         }
         if tag == proto::F_TERMINATE {
             self.sent_terminate = true;
-        }
-        if self.state == ClientState::Connecting {
-            self.pre_connect_frames.push(PendingFrameData {
-                tag,
-                data: data.to_vec(),
-            });
-            return;
         }
         self.send_frame(data);
     }
