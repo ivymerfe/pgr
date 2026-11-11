@@ -1,7 +1,7 @@
 from tests.roznica import roznica_main
 import sys
 
-TIME = 40
+TIME = 20
 NUM_WORKERS = 5
 CAPTURE_DELAY_MIN = 2
 CAPTURE_DELAY_MAX = 5

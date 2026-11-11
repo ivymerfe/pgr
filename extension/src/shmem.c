@@ -46,7 +46,7 @@ uint32 xact_enter_shared() {
   CaptureState* c = &Shmem->capture;
   uint32 gen;
   SpinLockAcquire(&c->lock);
-  c->open_xacts++;
+  c->open_xacts += 1;
   gen = channel_running(ChanCapture) ? channel_generation(ChanCapture) : 0;
   SpinLockRelease(&c->lock);
   return gen;
@@ -55,18 +55,16 @@ uint32 xact_enter_shared() {
 bool xact_leave_shared(uint32 gen) {
   CaptureState* c = &Shmem->capture;
   bool last = false;
+  
   SpinLockAcquire(&c->lock);
-  c->open_xacts--;
+  c->open_xacts -= 1;
   if (channel_running(ChanCapture) && gen != channel_generation(ChanCapture) &&
       c->pending_xacts > 0) {
-    last = --c->pending_xacts == 0;
+    c->pending_xacts -= 1;
+    last = c->pending_xacts == 0;
   }
   SpinLockRelease(&c->lock);
   return last;
-}
-
-bool xact_is_pre(uint32 gen) {
-  return channel_running(ChanCapture) && gen != channel_generation(ChanCapture);
 }
 
 void init_stats() {

@@ -114,7 +114,7 @@ static bool capture_gate() {
   if (!channel_running(ChanCapture)) {
     return false;
   }
-  if (TxOpen && xact_is_pre(TxGen)) {
+  if (TxOpen && TxGen != channel_generation(ChanCapture)) {
     return false;
   }
   uint32 gen = channel_generation(ChanCapture);
@@ -217,25 +217,25 @@ static void pgr_exec_parse_message_hook(const char* query_string,
                                         int numParams) {
   stats_add_statement();
   send_timing_event(MsgTypeParse);
-  if (prev_exec_parse_message_hook) {
-    prev_exec_parse_message_hook(query_string, stmt_name, paramTypes,
-                                 numParams);
-  }
   StatementIndex++;
   if (capture_gate()) {
     capture_parse(stmt_name, query_string, paramTypes, numParams);
+  }
+  if (prev_exec_parse_message_hook) {
+    prev_exec_parse_message_hook(query_string, stmt_name, paramTypes,
+                                 numParams);
   }
 }
 
 static void pgr_exec_simple_query_hook(const char* query_string) {
   stats_add_statement();
   send_timing_event(MsgTypeSimpleQuery);
-  if (prev_exec_simple_query_hook) {
-    prev_exec_simple_query_hook(query_string);
-  }
   StatementIndex++;
   if (capture_gate()) {
     capture_simple_query(query_string);
+  }
+  if (prev_exec_simple_query_hook) {
+    prev_exec_simple_query_hook(query_string);
   }
 }
 
@@ -249,14 +249,14 @@ static void pgr_exec_bind_message_hook(const char* portal_name,
                                        ParamListInfo params) {
   stats_add_statement();
   send_timing_event(MsgTypeBind);
-  if (prev_exec_bind_message_hook) {
-    prev_exec_bind_message_hook(portal_name, stmt_name, numPFormats, pformats,
-                                numRFormats, rformats, numParams, params);
-  }
   StatementIndex++;
   if (capture_gate()) {
     capture_bind(portal_name, stmt_name, numRFormats, rformats, numParams,
                  params);
+  }
+  if (prev_exec_bind_message_hook) {
+    prev_exec_bind_message_hook(portal_name, stmt_name, numPFormats, pformats,
+                                numRFormats, rformats, numParams, params);
   }
 }
 
@@ -264,43 +264,43 @@ static void pgr_exec_execute_message_hook(const char* portal_name,
                                           long max_rows) {
   stats_add_statement();
   send_timing_event(MsgTypeExecute);
-  if (prev_exec_execute_message_hook) {
-    prev_exec_execute_message_hook(portal_name, max_rows);
-  }
   StatementIndex++;
   if (capture_gate()) {
     capture_execute(portal_name, max_rows);
+  }
+  if (prev_exec_execute_message_hook) {
+    prev_exec_execute_message_hook(portal_name, max_rows);
   }
 }
 
 static void pgr_pq_msg_sync_hook() {
   stats_add_statement();
   send_timing_event(MsgTypeSync);
-  if (prev_pq_msg_sync_hook) {
-    prev_pq_msg_sync_hook();
-  }
   if (capture_gate()) {
     capture_sync();
+  }
+  if (prev_pq_msg_sync_hook) {
+    prev_pq_msg_sync_hook();
   }
 }
 
 static void pgr_pq_msg_close_hook(int close_type, const char* close_target) {
   stats_add_statement();
   send_timing_event(MsgTypeClose);
-  if (prev_pq_msg_close_hook) {
-    prev_pq_msg_close_hook(close_type, close_target);
-  }
   if (capture_gate()) {
     capture_close(close_type, close_target);
+  }
+  if (prev_pq_msg_close_hook) {
+    prev_pq_msg_close_hook(close_type, close_target);
   }
 }
 
 static void pgr_ClientAuthentication_hook(struct Port* port, int status) {
+  read_client_info(port);
+  send_timing_event(MsgTypeConnect);
   if (prev_ClientAuthentication) {
     prev_ClientAuthentication(port, status);
   }
-  read_client_info(port);
-  send_timing_event(MsgTypeConnect);
 }
 
 static void pgr_post_parse_analyze_hook(ParseState* pstate,

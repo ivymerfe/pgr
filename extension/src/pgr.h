@@ -117,7 +117,6 @@ void capture_close(int close_type, const char* target);
 
 uint32 xact_enter_shared();
 bool xact_leave_shared(uint32 gen);
-bool xact_is_pre(uint32 gen);
 
 // stats
 void init_stats();
