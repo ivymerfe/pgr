@@ -12,6 +12,7 @@ pub const F_TERMINATE: u8 = b'X';
 
 pub const B_AUTH_REQUEST: u8 = b'R';
 pub const B_READY_FOR_QUERY: u8 = b'Z';
+pub const B_ERROR: u8 = b'E';
 
 pub const TERMINATE_MSG: [u8; 5] = [F_TERMINATE, 0, 0, 0, 4];
 

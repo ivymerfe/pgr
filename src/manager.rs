@@ -3,14 +3,13 @@ use std::sync::Arc;
 use std::thread::sleep;
 use std::time::Duration;
 
+use crate::worker::{Clock, Worker};
 use crossbeam_channel::{Sender, bounded};
-use quanta::Instant;
 use tracing::{error, info};
 
 use crate::capture::{CaptureMessage, CaptureReader, ClientEvent, ClientId};
 use crate::client::ReplayConfig;
 use crate::utils::ReplayStats;
-use crate::worker::Worker;
 
 const QUEUE_CAP: usize = 16384;
 
@@ -80,12 +79,12 @@ pub fn replay(config: ReplayConfig, mut reader: CaptureReader) -> anyhow::Result
     let stats = Arc::new(ReplayStats::new());
     spawn_reporter(stats.clone());
 
-    let start = Instant::now();
+    let clock = Arc::new(Clock::new());
     let mut txs = Vec::new();
     let mut handles = Vec::new();
     for idx in 0..config.threads {
         let (tx, rx) = bounded::<CaptureMessage>(QUEUE_CAP);
-        let mut worker = Worker::new(idx, config.clone(), rx, stats.clone(), start)?;
+        let mut worker = Worker::new(idx, config.clone(), rx, stats.clone(), clock.clone())?;
         handles.push(std::thread::spawn(move || worker.run()));
         txs.push(tx);
     }

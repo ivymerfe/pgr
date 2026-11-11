@@ -1,8 +1,8 @@
-use std::cmp::Reverse;
 use std::collections::hash_map::Entry;
-use std::collections::{BinaryHeap, HashMap, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::time::Duration;
 
 use crossbeam_channel::{Receiver, TryRecvError};
@@ -16,14 +16,63 @@ use crate::client::{ReplayClient, ReplayConfig};
 use crate::utils::ReplayStats;
 
 const HORIZON_US: u64 = 1_000_000;
-const IDLE: Duration = Duration::from_millis(1);
+const IDLE_US: u64 = 1_000;
+const TOLERANCE_US: u64 = 1_000;
+const LEAD_UP_DIV: u64 = 8;
+const LEAD_DOWN_US: u64 = 1;
+const MAX_LEAD_US: u64 = 1_000_000;
 const READ_BUF: usize = 65536;
+
+pub struct Clock {
+    start: Instant,
+    lead: AtomicU64,
+}
+
+impl Clock {
+    pub fn new() -> Self {
+        Self {
+            start: Instant::now(),
+            lead: AtomicU64::new(0),
+        }
+    }
+
+    fn now(&self) -> u64 {
+        self.start.elapsed().as_micros() as u64
+    }
+
+    fn lead(&self) -> u64 {
+        self.lead.load(Relaxed)
+    }
+
+    fn virt(&self) -> u64 {
+        self.now() + self.lead()
+    }
+
+    fn adjust(&self, late: u64) {
+        let _ = self.lead.fetch_update(Relaxed, Relaxed, |l| {
+            Some(if late > TOLERANCE_US {
+                (l + late / LEAD_UP_DIV).min(MAX_LEAD_US)
+            } else {
+                l.saturating_sub(LEAD_DOWN_US)
+            })
+        });
+    }
+}
 
 #[derive(Default)]
 struct Slot {
     queue: VecDeque<CaptureMessage>,
     client: Option<ReplayClient>,
-    timer: Option<u64>,
+}
+
+impl Slot {
+    fn blocked(&self) -> bool {
+        self.client.as_ref().is_some_and(ReplayClient::waiting)
+    }
+
+    fn head_ts(&self) -> Option<u64> {
+        self.queue.front().map(|m| m.ts)
+    }
 }
 
 #[derive(Default)]
@@ -80,15 +129,15 @@ pub struct Worker {
     config: Arc<ReplayConfig>,
     stats: Arc<ReplayStats>,
     rx: Receiver<CaptureMessage>,
-    start: Instant,
+    clock: Arc<Clock>,
     poll: Poll,
     pending: Option<CaptureMessage>,
     closed: bool,
     slots: HashMap<ClientId, Slot>,
-    timers: BinaryHeap<Reverse<(u64, ClientId)>>,
     limiter: Limiter,
     lag: Lag,
     buf: Vec<u8>,
+    due: Vec<(u64, ClientId)>,
 }
 
 impl Worker {
@@ -97,7 +146,7 @@ impl Worker {
         config: Arc<ReplayConfig>,
         rx: Receiver<CaptureMessage>,
         stats: Arc<ReplayStats>,
-        start: Instant,
+        clock: Arc<Clock>,
     ) -> io::Result<Self> {
         let rate = config.max_rps as f64 / config.threads as f64;
         Ok(Self {
@@ -105,23 +154,26 @@ impl Worker {
             config,
             stats,
             rx,
-            start,
+            clock,
             poll: Poll::new()?,
             pending: None,
             closed: false,
             slots: HashMap::new(),
-            timers: BinaryHeap::new(),
             limiter: Limiter::new(rate),
             lag: Lag::default(),
             buf: vec![0; READ_BUF],
+            due: Vec::new(),
         })
     }
 
     pub fn run(&mut self) {
         let mut events = Events::with_capacity(1024);
+        let mut timeout = IDLE_US;
         loop {
-            self.pull();
-            if let Err(e) = self.poll.poll(&mut events, Some(self.timeout())) {
+            if let Err(e) = self
+                .poll
+                .poll(&mut events, Some(Duration::from_micros(timeout)))
+            {
                 if e.kind() == io::ErrorKind::Interrupted {
                     continue;
                 }
@@ -132,33 +184,21 @@ impl Worker {
                 self.on_event(ev);
             }
             self.pull();
-            self.dispatch_due();
+            timeout = self.dispatch();
             if self.closed && self.pending.is_none() && self.slots.is_empty() {
                 break;
             }
         }
         if self.lag.n > 0 {
+            let k = self.config.speed / 1e3;
             info!(
-                "[worker {}] send lag avg={:.3}ms max={:.3}ms",
+                "[worker {}] lag avg={:.3}ms max={:.3}ms lead={:.3}ms",
                 self.idx,
-                self.lag.sum as f64 / self.lag.n as f64 / 1e3,
-                self.lag.max as f64 / 1e3
+                self.lag.sum as f64 / self.lag.n as f64 * k,
+                self.lag.max as f64 * k,
+                self.clock.lead() as f64 * k
             );
         }
-    }
-
-    fn now(&self) -> u64 {
-        self.start.elapsed().as_micros() as u64
-    }
-
-    fn timeout(&self) -> Duration {
-        let now = self.now();
-        self.timers
-            .peek()
-            .map_or(IDLE, |Reverse((t, _))| {
-                Duration::from_micros(t.saturating_sub(now))
-            })
-            .min(IDLE)
     }
 
     fn pull(&mut self) {
@@ -174,7 +214,7 @@ impl Worker {
                     }
                 },
             };
-            if msg.ts > self.now() + HORIZON_US {
+            if msg.ts > self.clock.virt() + HORIZON_US {
                 self.pending = Some(msg);
                 return;
             }
@@ -183,8 +223,7 @@ impl Worker {
     }
 
     fn enqueue(&mut self, msg: CaptureMessage) {
-        let id = msg.id;
-        let slot = match self.slots.entry(id) {
+        let slot = match self.slots.entry(msg.id) {
             Entry::Occupied(e) => e.into_mut(),
             Entry::Vacant(e) if matches!(msg.event, ClientEvent::Connect { .. }) => {
                 e.insert(Slot::default())
@@ -192,55 +231,58 @@ impl Worker {
             Entry::Vacant(_) => return,
         };
         slot.queue.push_back(msg);
-        self.drive(id);
     }
 
-    fn dispatch_due(&mut self) {
-        let now = self.now();
-        while let Some(&Reverse((t, id))) = self.timers.peek() {
-            if t > now {
-                break;
-            }
-            self.timers.pop();
-            if let Some(slot) = self.slots.get_mut(&id) {
-                if slot.timer.is_some_and(|x| x <= t) {
-                    slot.timer = None;
-                }
-            }
-            self.drive(id);
-        }
-    }
-
-    fn drive(&mut self, id: ClientId) {
-        let now = self.now();
+    fn dispatch(&mut self) -> u64 {
         loop {
-            let Some(slot) = self.slots.get_mut(&id) else {
-                return;
-            };
-            if slot.client.as_ref().is_some_and(ReplayClient::waiting) {
-                return;
-            }
-            let Some(head) = slot.queue.front() else {
-                return;
-            };
-            let at = if head.ts > now {
-                head.ts
-            } else if matches!(head.event, ClientEvent::Connect { .. }) {
-                now
-            } else {
-                now + self.limiter.acquire(now)
-            };
-            if at > now {
-                if slot.timer.map_or(true, |t| t > at) {
-                    slot.timer = Some(at);
-                    self.timers.push(Reverse((at, id)));
+            let v = self.clock.virt();
+            let mut next = IDLE_US;
+            let mut due = std::mem::take(&mut self.due);
+            due.clear();
+            for (&id, slot) in &self.slots {
+                if slot.blocked() {
+                    continue;
                 }
-                return;
+                match slot.head_ts() {
+                    Some(ts) if ts <= v => due.push((ts, id)),
+                    Some(ts) => next = next.min(ts - v),
+                    None => {}
+                }
             }
-            let msg = slot.queue.pop_front().unwrap();
-            self.lag.add(now - msg.ts);
-            self.execute(msg);
+            if due.is_empty() {
+                self.due = due;
+                return next;
+            }
+            due.sort_unstable();
+            let mut throttled = None;
+            for &(_, id) in &due {
+                if let Some(wait) = self.send_next(id) {
+                    throttled = Some(wait);
+                    break;
+                }
+            }
+            self.due = due;
+            if let Some(wait) = throttled {
+                return wait.max(1);
+            }
         }
+    }
+
+    fn send_next(&mut self, id: ClientId) -> Option<u64> {
+        let now = self.clock.now();
+        let head = self.slots.get(&id)?.queue.front()?;
+        if !matches!(head.event, ClientEvent::Connect { .. }) {
+            let wait = self.limiter.acquire(now);
+            if wait > 0 {
+                return Some(wait);
+            }
+        }
+        let msg = self.slots.get_mut(&id)?.queue.pop_front()?;
+        self.clock
+            .adjust((now + self.clock.lead()).saturating_sub(msg.ts));
+        self.lag.add(now.saturating_sub(msg.ts));
+        self.execute(msg);
+        None
     }
 
     fn execute(&mut self, msg: CaptureMessage) {
@@ -277,16 +319,13 @@ impl Worker {
 
     fn on_event(&mut self, ev: &Event) {
         let id = ev.token().0 as ClientId;
-        let Some(client) = self.slots.get_mut(&id).and_then(|s| s.client.as_mut()) else {
-            return;
-        };
-        client.on_event(ev, &mut self.buf);
-        if !self.reap(id) {
-            self.drive(id);
+        if let Some(client) = self.slots.get_mut(&id).and_then(|s| s.client.as_mut()) {
+            client.on_event(ev, &mut self.buf);
+            self.reap(id);
         }
     }
 
-    fn reap(&mut self, id: ClientId) -> bool {
+    fn reap(&mut self, id: ClientId) {
         let dead = self
             .slots
             .get(&id)
@@ -295,6 +334,5 @@ impl Worker {
         if dead {
             self.slots.remove(&id);
         }
-        dead
     }
 }
