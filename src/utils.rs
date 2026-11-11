@@ -24,11 +24,6 @@ impl Stream {
         self.compact();
     }
 
-    pub fn mark_read_all(&mut self) {
-        self.read_offset = self.committed_offset;
-        self.compact();
-    }
-
     pub fn data(&self) -> &[u8] {
         &self.data[self.read_offset - self.data_offset..self.committed_offset - self.data_offset]
     }
@@ -37,15 +32,6 @@ impl Stream {
         self.data.extend_from_slice(bytes);
         self.committed_offset = self.data_offset + self.data.len();
     }
-
-    // pub fn write_no_commit(&mut self, bytes: &[u8]) {
-    //     self.data.extend_from_slice(bytes);
-    // }
-
-    // pub fn commit(&mut self, len: usize) {
-    //     self.committed_offset =
-    //         (self.committed_offset + len).min(self.data_offset + self.data.len());
-    // }
 
     fn compact(&mut self) {
         let garbage_size = self.read_offset - self.data_offset;

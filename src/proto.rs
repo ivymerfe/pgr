@@ -4,7 +4,6 @@ pub const F_PASSWORD_MESSAGE: u8 = b'p';
 
 pub const F_PARSE: u8 = b'P';
 pub const F_BIND: u8 = b'B';
-pub const F_DESCRIBE: u8 = b'D';
 pub const F_EXECUTE: u8 = b'E';
 pub const F_CLOSE: u8 = b'C';
 pub const F_SYNC: u8 = b'S';
@@ -12,23 +11,9 @@ pub const F_QUERY: u8 = b'Q';
 pub const F_TERMINATE: u8 = b'X';
 
 pub const B_AUTH_REQUEST: u8 = b'R';
-pub const B_PARAMETER_STATUS: u8 = b'S';
-pub const B_BACKEND_KEY_DATA: u8 = b'K';
-
-pub const B_PARSE_COMPLETE: u8 = b'1';
-pub const B_BIND_COMPLETE: u8 = b'2';
-pub const B_CLOSE_COMPLETE: u8 = b'3';
-pub const B_COMMAND_COMPLETE: u8 = b'C';
-pub const B_DATA_ROW: u8 = b'D';
-pub const B_ERROR: u8 = b'E';
-pub const B_EMPTY_QUERY: u8 = b'I';
-pub const B_NOTICE: u8 = b'N';
-pub const B_NOTIFICATION: u8 = b'A';
-pub const B_NO_DATA: u8 = b'n';
-pub const B_PORTAL_SUSPENDED: u8 = b's';
-pub const B_PARAMETER_DESC: u8 = b't';
-pub const B_ROW_DESC: u8 = b'T';
 pub const B_READY_FOR_QUERY: u8 = b'Z';
+
+pub const TERMINATE_MSG: [u8; 5] = [F_TERMINATE, 0, 0, 0, 4];
 
 #[derive(Debug, Default)]
 pub struct ErrorFields {
@@ -39,43 +24,86 @@ pub struct ErrorFields {
     pub hint: Option<String>,
 }
 
-impl std::fmt::Display for ErrorFields {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut parts = Vec::new();
-        if let Some(s) = &self.severity {
-            parts.push(format!("severity={}", s));
-        }
-        if let Some(c) = &self.code {
-            parts.push(format!("code={}", c));
-        }
-        if let Some(m) = &self.message {
-            parts.push(format!("message={}", m));
-        }
-        if let Some(d) = &self.detail {
-            parts.push(format!("detail={}", d));
-        }
-        if let Some(h) = &self.hint {
-            parts.push(format!("hint={}", h));
-        }
-        write!(f, "{}", parts.join(", "))
-    }
-}
-
-pub enum BackendMessage<'a> {
-    Authentication(Authentication),
-    ParameterStatus { _name: String, _value: String },
-    BackendKeyData { _pid: i32, _secret: i32 },
-    ReadyForQuery,
-    ErrorResponse(ErrorFields),
-    NoticeResponse,
-    Other { _tag: u8, _frame: &'a [u8] },
-}
-
 pub enum Authentication {
     Ok,
     Cleartext,
     Md5 { salt: [u8; 4] },
     Unsupported(i32),
+}
+
+pub enum BackendMessage {
+    Authentication(Authentication),
+    ReadyForQuery,
+    ErrorResponse(ErrorFields),
+    Other,
+}
+
+pub struct Frame(Vec<u8>);
+
+impl Frame {
+    pub fn new(tag: u8) -> Self {
+        Self(vec![tag, 0, 0, 0, 0])
+    }
+
+    pub fn u8(&mut self, v: u8) -> &mut Self {
+        self.0.push(v);
+        self
+    }
+
+    pub fn i16(&mut self, v: i16) -> &mut Self {
+        self.0.extend_from_slice(&v.to_be_bytes());
+        self
+    }
+
+    pub fn i32(&mut self, v: i32) -> &mut Self {
+        self.0.extend_from_slice(&v.to_be_bytes());
+        self
+    }
+
+    pub fn u32(&mut self, v: u32) -> &mut Self {
+        self.0.extend_from_slice(&v.to_be_bytes());
+        self
+    }
+
+    pub fn raw(&mut self, v: &[u8]) -> &mut Self {
+        self.0.extend_from_slice(v);
+        self
+    }
+
+    pub fn cstr(&mut self, s: &str) -> &mut Self {
+        self.0.extend_from_slice(s.as_bytes());
+        self.0.push(0);
+        self
+    }
+
+    pub fn finish(mut self) -> Vec<u8> {
+        let n = (self.0.len() - 1) as i32;
+        self.0[1..5].copy_from_slice(&n.to_be_bytes());
+        self.0
+    }
+}
+
+pub fn parse_message(tag: u8, data: &[u8]) -> Result<BackendMessage, ()> {
+    Ok(match tag {
+        B_AUTH_REQUEST => {
+            if data.len() < 4 {
+                return Err(());
+            }
+            let code = i32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+            match code {
+                0 => BackendMessage::Authentication(Authentication::Ok),
+                3 => BackendMessage::Authentication(Authentication::Cleartext),
+                5 => {
+                    let salt: [u8; 4] = data.get(4..8).ok_or(())?.try_into().unwrap();
+                    BackendMessage::Authentication(Authentication::Md5 { salt })
+                }
+                other => BackendMessage::Authentication(Authentication::Unsupported(other)),
+            }
+        }
+        B_ERROR => BackendMessage::ErrorResponse(parse_error_fields(data)),
+        B_READY_FOR_QUERY => BackendMessage::ReadyForQuery,
+        _ => BackendMessage::Other,
+    })
 }
 
 pub fn try_read_frame(buf: &[u8]) -> Option<(u8, usize)> {
@@ -107,59 +135,6 @@ pub fn parse_error_fields(mut data: &[u8]) -> ErrorFields {
     }
     fields
 }
-
-pub fn parse_message(tag: u8, mut data: &[u8]) -> Result<BackendMessage<'_>, ()> {
-    Ok(match tag {
-        B_AUTH_REQUEST => {
-            if data.len() < 4 {
-                return Err(());
-            }
-            let code = i32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-            data = &data[4..];
-            match code {
-                0 => BackendMessage::Authentication(Authentication::Ok),
-                3 => BackendMessage::Authentication(Authentication::Cleartext),
-                5 => {
-                    if data.len() < 4 {
-                        return Err(());
-                    }
-                    let mut salt = [0u8; 4];
-                    salt.copy_from_slice(&data[..4]);
-                    BackendMessage::Authentication(Authentication::Md5 { salt })
-                }
-                other => BackendMessage::Authentication(Authentication::Unsupported(other)),
-            }
-        }
-        B_PARAMETER_STATUS => {
-            let (name, rest) = read_cstr(data);
-            let (value, _) = read_cstr(rest);
-            BackendMessage::ParameterStatus {
-                _name: name,
-                _value: value,
-            }
-        }
-        B_BACKEND_KEY_DATA => {
-            if data.len() < 8 {
-                return Err(());
-            }
-            let pid = i32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-            let secret = i32::from_be_bytes([data[4], data[5], data[6], data[7]]);
-            BackendMessage::BackendKeyData {
-                _pid: pid,
-                _secret: secret,
-            }
-        }
-        B_READY_FOR_QUERY => BackendMessage::ReadyForQuery,
-        B_ERROR => BackendMessage::ErrorResponse(parse_error_fields(data)),
-        B_NOTICE => BackendMessage::NoticeResponse,
-        other => BackendMessage::Other {
-            _tag: other,
-            _frame: data,
-        },
-    })
-}
-
-pub const TERMINATE_MSG: [u8; 5] = [F_TERMINATE, 0, 0, 0, 4];
 
 pub fn encode_startup(params: &[(&str, String)]) -> Vec<u8> {
     let mut body = Vec::new();
@@ -203,4 +178,26 @@ fn read_cstr(buf: &[u8]) -> (String, &[u8]) {
         &buf[pos..]
     };
     (s, rest)
+}
+
+impl std::fmt::Display for ErrorFields {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut parts = Vec::new();
+        if let Some(s) = &self.severity {
+            parts.push(format!("severity={}", s));
+        }
+        if let Some(c) = &self.code {
+            parts.push(format!("code={}", c));
+        }
+        if let Some(m) = &self.message {
+            parts.push(format!("message={}", m));
+        }
+        if let Some(d) = &self.detail {
+            parts.push(format!("detail={}", d));
+        }
+        if let Some(h) = &self.hint {
+            parts.push(format!("hint={}", h));
+        }
+        write!(f, "{}", parts.join(", "))
+    }
 }

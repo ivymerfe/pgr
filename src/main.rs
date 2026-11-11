@@ -15,7 +15,6 @@ use crate::analyzer::StorageWriter;
 use crate::capture::CaptureReader;
 use crate::client::ReplayConfig;
 use crate::compare::TimingReader;
-use crate::manager::ReplayManager;
 use crate::trace_reader::TraceReader;
 
 mod analyzer;
@@ -23,12 +22,12 @@ mod capture;
 mod capture_dump;
 mod client;
 mod compare;
-mod r#loop;
 mod manager;
 mod proto;
 mod trace_reader;
 mod utils;
 mod viewer;
+mod worker;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None, arg_required_else_help = true, disable_help_flag = true)]
@@ -67,13 +66,22 @@ enum Commands {
         )]
         speed: f64,
 
+        #[arg(short, long, default_value_t = 4, help = "Worker threads")]
+        threads: usize,
+
         #[arg(
-            short,
             long,
-            default_value_t = 1.0,
-            help = "Extra speed while replay lags behind the capture (0 = off, 1.0 = 2x until caught up)"
+            default_value_t = 0,
+            help = "Max concurrent connections (0 = unlimited)"
         )]
-        catchup: f64,
+        max_conns: usize,
+
+        #[arg(
+            long,
+            default_value_t = 0,
+            help = "Max requests per second (0 = unlimited)"
+        )]
+        max_rps: u32,
     },
     #[command(about = "Dump a capture to CSV")]
     Dump {
@@ -160,7 +168,9 @@ fn run_command(cli: Cli) -> anyhow::Result<()> {
             user,
             pass,
             speed,
-            catchup,
+            threads,
+            max_conns,
+            max_rps,
         } => {
             let file = try_open(&input)?;
             let reader = CaptureReader::new(file)?;
@@ -168,9 +178,17 @@ fn run_command(cli: Cli) -> anyhow::Result<()> {
                 "Replaying {} -> {host}:{port} dbname={dbname} user={user}",
                 input.display()
             );
-            let config = ReplayConfig::new(host, port, dbname, user, pass, speed, catchup);
-            let mut mgr = ReplayManager::new();
-            mgr.replay(config, reader)?;
+            let config = ReplayConfig {
+                server: SocketAddr::new(host, port),
+                user,
+                password: pass,
+                dbname,
+                speed,
+                threads: threads.max(1),
+                max_conns,
+                max_rps,
+            };
+            manager::replay(config, reader)?;
         }
         Commands::Dump { input, output } => {
             let file = try_open(&input)?;

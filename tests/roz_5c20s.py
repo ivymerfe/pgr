@@ -1,11 +1,11 @@
 from tests.roznica import roznica_main
 import sys
 
-TIME = 20
+TIME = 40
 NUM_WORKERS = 5
 CAPTURE_DELAY_MIN = 2
 CAPTURE_DELAY_MAX = 5
-SPEED = 1.2
+SPEED = 1.0
 
 if __name__ == "__main__":
     sys.exit(roznica_main(TIME, NUM_WORKERS, CAPTURE_DELAY_MAX, CAPTURE_DELAY_MAX, SPEED))

@@ -1,261 +1,299 @@
-use std::net::{IpAddr, SocketAddr};
+use std::io::{self, Read, Write};
+use std::net::SocketAddr;
 use std::sync::Arc;
 
-use quanta::Instant;
-use socket2::{Domain, Socket, Type};
-use tracing::{error, info, warn};
+use mio::event::Event;
+use mio::net::TcpStream;
+use mio::{Interest, Registry, Token};
+use tracing::{error, info};
 
-use crate::capture::ClientId;
-use crate::proto::{self, Authentication, BackendMessage};
+use crate::capture::{ClientEvent, ClientId};
+use crate::proto::{self, Authentication, BackendMessage, Frame};
 use crate::utils::{ReplayStats, Stream};
 
-#[derive(Clone)]
+const APPLICATION_NAME: &str = "pgr";
+const BUF_SIZE: usize = 65536;
+
 pub struct ReplayConfig {
     pub server: SocketAddr,
     pub user: String,
     pub password: Option<String>,
     pub dbname: String,
-    pub application_name: String,
     pub speed: f64,
-    pub catchup: f64,
+    pub threads: usize,
+    pub max_conns: usize,
+    pub max_rps: u32,
 }
 
-#[derive(PartialEq)]
-pub enum ClientState {
+#[derive(Clone, Copy, PartialEq)]
+enum State {
     Connecting,
-    Normal,
+    Startup,
+    Ready,
     Dead,
 }
 
-impl ReplayConfig {
-    pub fn new(
-        host: IpAddr,
-        port: u16,
-        dbname: String,
-        user: String,
-        password: Option<String>,
-        speed: f64,
-        catchup: f64,
-    ) -> Self {
-        ReplayConfig {
-            server: SocketAddr::new(host, port),
-            user,
-            password,
-            dbname,
-            application_name: "pgr".to_string(),
-            speed,
-            catchup
-        }
-    }
-}
-
 pub struct ReplayClient {
-    pub id: ClientId,
-    pub config: ReplayConfig,
-    pub addr: SocketAddr,
-    pub stats: Arc<ReplayStats>,
-
-    parse_stream: Stream,
-    outbox: Stream,
-
-    pub state: ClientState,
-    sent_terminate: bool,
-    pub rfq: bool,
-
-    start: Instant,
-    req_index: u32,
-    resp_index: u32,
-}
-
-pub struct NewConnection {
-    pub client: ReplayClient,
-    pub socket: Socket,
+    id: ClientId,
+    config: Arc<ReplayConfig>,
+    stats: Arc<ReplayStats>,
+    stream: TcpStream,
+    state: State,
+    waiting: bool,
+    restore: Option<String>,
+    rbuf: Stream,
+    wbuf: Stream,
 }
 
 impl ReplayClient {
     pub fn connect(
         id: ClientId,
-        config: ReplayConfig,
+        config: Arc<ReplayConfig>,
         stats: Arc<ReplayStats>,
-    ) -> std::io::Result<NewConnection> {
-        let domain = match config.server {
-            SocketAddr::V4(_) => Domain::IPV4,
-            SocketAddr::V6(_) => Domain::IPV6,
-        };
-        let socket = Socket::new(domain, Type::STREAM, None)?;
-        socket.set_tcp_nodelay(true)?;
-        socket.set_nonblocking(true)?;
-
-        let addr = config.server;
-        let mut client = ReplayClient {
+        session_id: String,
+        registry: &Registry,
+    ) -> io::Result<Self> {
+        let mut stream = TcpStream::connect(config.server)?;
+        stream.set_nodelay(true)?;
+        registry.register(
+            &mut stream,
+            Token(id as usize),
+            Interest::READABLE | Interest::WRITABLE,
+        )?;
+        let restore = (!session_id.is_empty())
+            .then(|| format!("SELECT pgr.srestore('{}')", session_id.replace('\'', "''")));
+        let startup = proto::encode_startup(&[
+            ("application_name", APPLICATION_NAME.to_string()),
+            ("user", config.user.clone()),
+            ("database", config.dbname.clone()),
+            ("pgr.client_id", id.to_string()),
+        ]);
+        let mut client = Self {
             id,
             config,
-            addr,
             stats,
-            parse_stream: Stream::new(65536),
-            outbox: Stream::new(65536),
-            state: ClientState::Connecting,
-            sent_terminate: false,
-            rfq: false,
-            start: Instant::now(),
-            req_index: 0,
-            resp_index: 0,
+            stream,
+            state: State::Connecting,
+            waiting: true,
+            restore,
+            rbuf: Stream::new(BUF_SIZE),
+            wbuf: Stream::new(BUF_SIZE),
         };
-        client.queue_startup();
-
-        Ok(NewConnection { client, socket })
+        client.send(&startup);
+        Ok(client)
     }
 
-    pub fn delta_us(&self) -> u64 {
-        self.start.elapsed().as_micros() as u64
+    pub fn waiting(&self) -> bool {
+        self.waiting
     }
 
-    fn send_frame(&mut self, data: &[u8]) {
-        self.outbox.write(data);
-        self.stats.log_send();
-        self.req_index += 1
+    pub fn is_dead(&self) -> bool {
+        self.state == State::Dead
     }
 
-    pub fn read_outbox(&self) -> &[u8] {
-        self.outbox.data()
-    }
-
-    pub fn clear_outbox(&mut self) {
-        self.outbox.mark_read_all();
-    }
-
-    fn handle_frame(&mut self, tag: u8, offset: usize, len: usize) {
-        let data = &self.parse_stream.data()[offset..len];
-        match self.state {
-            ClientState::Dead => return,
-            ClientState::Connecting => match proto::parse_message(tag, data) {
-                Ok(msg) => match msg {
-                    BackendMessage::Authentication(auth) => self.handle_auth(auth),
-                    BackendMessage::ErrorResponse(e) => {
-                        error!("[{}] auth failed: {e}", self.id);
-                    }
-                    BackendMessage::ReadyForQuery => {
-                        info!("[{}] connected: {}", self.id, self.addr);
-                        self.state = ClientState::Normal;
-                        self.start = Instant::now();
-                        self.rfq = true;
-                    }
-                    _ => {}
-                },
-                Err(()) => {
-                    error!("[{}] malformed server message", self.id);
-                }
-            },
-            ClientState::Normal => {
-                match proto::parse_message(tag, data) {
-                    Ok(msg) => match msg {
-                        BackendMessage::ReadyForQuery => self.rfq = true,
-                        BackendMessage::ErrorResponse(e) => {
-                            error!(
-                                "[{}] server error: code={:?}, message={}, detail={:?}, hint={:?}",
-                                self.id,
-                                e.code,
-                                e.message.unwrap_or_default(),
-                                e.detail,
-                                e.hint
-                            );
-                        }
-                        _ => {}
-                    },
-                    Err(()) => {
-                        error!("[{}] malformed server message in normal state", self.id);
-                    }
-                }
-                self.stats.log_recv();
-            }
-        }
-        self.resp_index += 1;
-    }
-
-    pub fn on_connected(&mut self, local_addr: SocketAddr) {
-        self.addr = local_addr;
-    }
-
-    pub fn replay_frame(&mut self, tag: u8, data: &[u8]) {
-        if self.state != ClientState::Normal {
+    pub fn replay(&mut self, event: ClientEvent) {
+        if self.state != State::Ready {
             return;
         }
-        if tag == proto::F_TERMINATE {
-            self.sent_terminate = true;
+        if let Some(frame) = encode(event) {
+            self.send(&frame);
+            self.flush();
         }
-        self.send_frame(data);
     }
 
-    pub fn on_read(&mut self, data: &[u8]) {
-        self.parse_stream.write(data);
-        while let Some((tag, frame_len)) = proto::try_read_frame(self.parse_stream.data()) {
-            self.handle_frame(tag, 5, frame_len);
-            self.parse_stream.mark_read(frame_len);
-            if self.state == ClientState::Dead {
+    pub fn on_event(&mut self, ev: &Event, buf: &mut [u8]) {
+        if self.state == State::Connecting {
+            if !(ev.is_writable() || ev.is_error() || ev.is_write_closed()) {
                 return;
             }
+            match self.stream.take_error() {
+                Ok(None) => {}
+                Ok(Some(e)) | Err(e) => return self.fail(e),
+            }
+            match self.stream.peer_addr() {
+                Ok(_) => self.state = State::Startup,
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::NotConnected | io::ErrorKind::WouldBlock
+                    ) =>
+                {
+                    return;
+                }
+                Err(e) => return self.fail(e),
+            }
+        }
+        self.read(buf);
+        self.flush();
+    }
+
+    fn send(&mut self, frame: &[u8]) {
+        self.wbuf.write(frame);
+        self.stats.log_send();
+        if matches!(frame[0], proto::F_QUERY | proto::F_SYNC) {
+            self.waiting = true;
         }
     }
 
-    pub fn on_eof(&mut self) {
-        info!(
-            "[{}] disconnected, work time = {:.3}",
-            self.id,
-            self.delta_us() as f32 / 1e3
-        );
-        self.state = ClientState::Dead;
-    }
-
-    pub fn on_io_error(&mut self, e: std::io::Error) {
+    fn fail(&mut self, e: io::Error) {
         error!("[{}] io failed: {e}", self.id);
-        self.state = ClientState::Dead;
+        self.state = State::Dead;
     }
 
-    pub fn on_replay_end(&mut self) {
-        if !self.sent_terminate {
-            warn!("[{}] injecting terminate frame", self.id);
-            self.replay_frame(proto::F_TERMINATE, &proto::TERMINATE_MSG);
-        }
-    }
-
-    fn queue_startup(&mut self) {
-        let mut params = Vec::new();
-        params.push(("application_name", self.config.application_name.clone()));
-        params.push(("user", self.config.user.clone()));
-        params.push(("database", self.config.dbname.clone()));
-        params.push(("pgr.client_id", self.id.to_string()));
-        let msg = proto::encode_startup(&params);
-        self.send_frame(&msg);
-    }
-
-    fn handle_auth(&mut self, auth: Authentication) {
-        match auth {
-            Authentication::Ok => {}
-            Authentication::Cleartext => match &self.config.password {
-                Some(pass) => {
-                    let msg = proto::encode_password(pass);
-                    self.send_frame(&msg);
+    fn read(&mut self, buf: &mut [u8]) {
+        while self.state != State::Dead {
+            match self.stream.read(buf) {
+                Ok(0) => {
+                    info!("[{}] disconnected", self.id);
+                    self.state = State::Dead;
                 }
-                None => {
-                    error!("[{}] server wants password but its not specified", self.id);
-                    self.state = ClientState::Dead;
-                }
-            },
-            Authentication::Md5 { salt } => match &self.config.password {
-                Some(pass) => {
-                    let hashed = proto::hash_md5_password(&self.config.user, pass, &salt);
-                    let msg = proto::encode_password(&hashed);
-                    self.send_frame(&msg);
-                }
-                None => {
-                    error!("[{}] server wants password but its not specified", self.id);
-                    self.state = ClientState::Dead;
-                }
-            },
-            Authentication::Unsupported(code) => {
-                error!("[{}] unsupported auth: {code}", self.id);
-                self.state = ClientState::Dead;
+                Ok(n) => self.on_data(&buf[..n]),
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => return,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => self.fail(e),
             }
         }
     }
+
+    fn flush(&mut self) {
+        if self.state == State::Connecting {
+            return;
+        }
+        while self.state != State::Dead && !self.wbuf.data().is_empty() {
+            match self.stream.write(self.wbuf.data()) {
+                Ok(0) => return,
+                Ok(n) => self.wbuf.mark_read(n),
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => return,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => self.fail(e),
+            }
+        }
+    }
+
+    fn on_data(&mut self, data: &[u8]) {
+        self.rbuf.write(data);
+        while self.state != State::Dead {
+            let Some((tag, len)) = proto::try_read_frame(self.rbuf.data()) else {
+                break;
+            };
+            self.on_frame(tag, len);
+            self.rbuf.mark_read(len);
+        }
+    }
+
+    fn on_frame(&mut self, tag: u8, len: usize) {
+        use State::*;
+        let msg = proto::parse_message(tag, &self.rbuf.data()[5..len]);
+        let counted = self.state == Ready;
+        match (self.state, msg) {
+            (_, Err(())) => error!("[{}] malformed server message", self.id),
+            (_, Ok(BackendMessage::ErrorResponse(e))) => {
+                error!("[{}] server error: {e}", self.id);
+                if self.state != Ready {
+                    self.state = Dead;
+                }
+            }
+            (_, Ok(BackendMessage::Authentication(auth))) => self.on_auth(auth),
+            (Startup, Ok(BackendMessage::ReadyForQuery)) => {
+                info!("[{}] connected", self.id);
+                self.state = Ready;
+                match self.restore.take() {
+                    Some(q) => self.send(&query_frame(&q)),
+                    None => self.waiting = false,
+                }
+            }
+            (Ready, Ok(BackendMessage::ReadyForQuery)) => self.waiting = false,
+            _ => {}
+        }
+        if counted {
+            self.stats.log_recv();
+        }
+    }
+
+    fn on_auth(&mut self, auth: Authentication) {
+        let password = match auth {
+            Authentication::Ok => return,
+            Authentication::Cleartext => self.config.password.clone(),
+            Authentication::Md5 { salt } => self
+                .config
+                .password
+                .as_ref()
+                .map(|p| proto::hash_md5_password(&self.config.user, p, &salt)),
+            Authentication::Unsupported(code) => {
+                error!("[{}] unsupported auth: {code}", self.id);
+                self.state = State::Dead;
+                return;
+            }
+        };
+        match password {
+            Some(p) => self.send(&proto::encode_password(&p)),
+            None => {
+                error!("[{}] server requires a password", self.id);
+                self.state = State::Dead;
+            }
+        }
+    }
+}
+
+fn query_frame(q: &str) -> Vec<u8> {
+    let mut b = Frame::new(proto::F_QUERY);
+    b.cstr(q);
+    b.finish()
+}
+
+fn encode(event: ClientEvent) -> Option<Vec<u8>> {
+    Some(match event {
+        ClientEvent::Lsn { .. } | ClientEvent::TxEnd { .. } | ClientEvent::Connect { .. } => {
+            return None;
+        }
+        ClientEvent::Disconnect => proto::TERMINATE_MSG.to_vec(),
+        ClientEvent::SimpleQuery { text } => query_frame(&text),
+        ClientEvent::Parse {
+            name,
+            query,
+            param_types,
+        } => {
+            let mut b = Frame::new(proto::F_PARSE);
+            b.cstr(&name).cstr(&query).i16(param_types.len() as i16);
+            for t in param_types {
+                b.u32(t);
+            }
+            b.finish()
+        }
+        ClientEvent::Bind {
+            portal,
+            statement,
+            result_formats,
+            params,
+        } => {
+            let mut b = Frame::new(proto::F_BIND);
+            b.cstr(&portal)
+                .cstr(&statement)
+                .i16(0)
+                .i16(params.len() as i16);
+            for p in params {
+                match p.value {
+                    Some(v) => b.i32(v.len() as i32).raw(&v),
+                    None => b.i32(-1),
+                };
+            }
+            b.i16(result_formats.len() as i16);
+            for f in result_formats {
+                b.i16(f as i16);
+            }
+            b.finish()
+        }
+        ClientEvent::Execute { portal, max_rows } => {
+            let mut b = Frame::new(proto::F_EXECUTE);
+            b.cstr(&portal)
+                .i32(max_rows.clamp(0, i32::MAX as i64) as i32);
+            b.finish()
+        }
+        ClientEvent::Sync => Frame::new(proto::F_SYNC).finish(),
+        ClientEvent::Close { kind, name } => {
+            let mut b = Frame::new(proto::F_CLOSE);
+            b.u8(kind).cstr(&name);
+            b.finish()
+        }
+    })
 }

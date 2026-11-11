@@ -1,234 +1,136 @@
-use std::{sync::Arc, thread::sleep, time::Duration};
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::thread::sleep;
+use std::time::Duration;
 
-use crossbeam_channel::{Sender, TrySendError, bounded};
+use crossbeam_channel::{Sender, bounded};
+use quanta::Instant;
 use tracing::{error, info};
 
-use crate::{
-    capture::{CaptureMessage, CaptureReader, ClientEvent},
-    client::ReplayConfig,
-    r#loop::{ConnCommand, ReplayLoop},
-    proto,
-    utils::ReplayStats,
-};
+use crate::capture::{CaptureMessage, CaptureReader, ClientEvent, ClientId};
+use crate::client::ReplayConfig;
+use crate::utils::ReplayStats;
+use crate::worker::Worker;
 
-const WAKE_BATCH: u32 = 128;
 const QUEUE_CAP: usize = 16384;
 
-struct Sink<'a> {
-    tx: &'a Sender<ConnCommand>,
-    waker: &'a Arc<mio::Waker>,
-    unwoken: u32,
-    ok: bool,
+struct Router {
+    txs: Vec<Sender<CaptureMessage>>,
+    load: Vec<usize>,
+    owner: HashMap<ClientId, usize>,
+    max_conns: usize,
+    skipped: u64,
 }
 
-impl Sink<'_> {
-    fn push(&mut self, cmd: ConnCommand) {
-        let cmd = match self.tx.try_send(cmd) {
-            Ok(()) => {
-                self.unwoken += 1;
-                if self.unwoken >= WAKE_BATCH {
-                    self.wake();
+impl Router {
+    fn route(&mut self, msg: CaptureMessage) -> bool {
+        let idx = match msg.event {
+            ClientEvent::Connect { .. } => {
+                if self.max_conns > 0 && self.owner.len() >= self.max_conns {
+                    self.skipped += 1;
+                    return true;
                 }
-                return;
+                let idx = (0..self.txs.len()).min_by_key(|&i| self.load[i]).unwrap();
+                self.owner.insert(msg.id, idx);
+                self.load[idx] += 1;
+                idx
             }
-            Err(TrySendError::Full(c)) => c,
-            Err(TrySendError::Disconnected(_)) => {
-                error!("ctl thread gone, dropping command");
-                self.ok = false;
-                return;
-            }
+            ClientEvent::Disconnect => match self.owner.remove(&msg.id) {
+                Some(idx) => {
+                    self.load[idx] -= 1;
+                    idx
+                }
+                None => return true,
+            },
+            _ => match self.owner.get(&msg.id) {
+                Some(&idx) => idx,
+                None => return true,
+            },
         };
-        self.wake();
-        if self.tx.send(cmd).is_err() {
-            error!("ctl thread gone, dropping command");
-            self.ok = false;
-            return;
-        }
-        self.unwoken += 1;
+        self.txs[idx].send(msg).is_ok()
     }
 
-    fn wake(&mut self) {
-        if self.unwoken == 0 {
-            return;
+    fn finish(self, ts: u64) {
+        if self.skipped > 0 {
+            info!("skipped {} clients over the connection limit", self.skipped);
         }
-        self.unwoken = 0;
-        if let Err(e) = self.waker.wake() {
-            error!("failed to wake ctl: {e}");
-            self.ok = false;
+        for (id, idx) in self.owner {
+            let event = ClientEvent::Disconnect;
+            let _ = self.txs[idx].send(CaptureMessage { id, ts, event });
         }
     }
 }
 
-fn begin(tag: u8, cap: usize) -> Vec<u8> {
-    let mut v = Vec::with_capacity(5 + cap);
-    v.push(tag);
-    v.extend_from_slice(&[0; 4]);
-    v
-}
-
-fn end(mut v: Vec<u8>) -> Vec<u8> {
-    let n = (v.len() - 1) as i32;
-    v[1..5].copy_from_slice(&n.to_be_bytes());
-    v
-}
-
-fn cstr(v: &mut Vec<u8>, s: &str) {
-    v.extend_from_slice(s.as_bytes());
-    v.push(0);
-}
-
-fn query_frame(q: &str) -> Vec<u8> {
-    let mut v = begin(proto::F_QUERY, q.len() + 1);
-    cstr(&mut v, q);
-    end(v)
-}
-
-fn emit(msg: CaptureMessage, ts: u64, out: &mut Sink) {
-    let id = msg.id;
-    let (tag, data) = match msg.event {
-        ClientEvent::Lsn { .. } | ClientEvent::TxEnd { .. } => return,
-        ClientEvent::Connect { session_id } => {
-            out.push(ConnCommand::connect(id, ts));
-            if session_id.is_empty() {
-                return;
-            }
-            let q = format!("SELECT pgr.srestore('{}')", session_id.replace('\'', "''"));
-            (proto::F_QUERY, query_frame(&q))
-        }
-        ClientEvent::Disconnect => (proto::F_TERMINATE, proto::TERMINATE_MSG.to_vec()),
-        ClientEvent::SimpleQuery { text } => (proto::F_QUERY, query_frame(&text)),
-        ClientEvent::Parse {
-            name,
-            query,
-            param_types,
-        } => {
-            let mut v = begin(
-                proto::F_PARSE,
-                name.len() + query.len() + 4 + param_types.len() * 4,
-            );
-            cstr(&mut v, &name);
-            cstr(&mut v, &query);
-            v.extend_from_slice(&(param_types.len() as i16).to_be_bytes());
-            for t in param_types {
-                v.extend_from_slice(&t.to_be_bytes());
-            }
-            (proto::F_PARSE, end(v))
-        }
-        ClientEvent::Bind {
-            portal,
-            statement,
-            result_formats,
-            params,
-        } => {
-            let vals: usize = params
-                .iter()
-                .map(|p| 4 + p.value.as_ref().map_or(0, |v| v.len()))
-                .sum();
-            let mut v = begin(
-                proto::F_BIND,
-                portal.len() + statement.len() + 8 + vals + result_formats.len() * 2,
-            );
-            cstr(&mut v, &portal);
-            cstr(&mut v, &statement);
-            v.extend_from_slice(&0i16.to_be_bytes());
-            v.extend_from_slice(&(params.len() as i16).to_be_bytes());
-            for p in params {
-                match p.value {
-                    Some(b) => {
-                        v.extend_from_slice(&(b.len() as i32).to_be_bytes());
-                        v.extend_from_slice(&b);
-                    }
-                    None => v.extend_from_slice(&(-1i32).to_be_bytes()),
-                }
-            }
-            v.extend_from_slice(&(result_formats.len() as i16).to_be_bytes());
-            for f in result_formats {
-                v.extend_from_slice(&(f as i16).to_be_bytes());
-            }
-            (proto::F_BIND, end(v))
-        }
-        ClientEvent::Execute { portal, max_rows } => {
-            let mut v = begin(proto::F_EXECUTE, portal.len() + 5);
-            cstr(&mut v, &portal);
-            v.extend_from_slice(&(max_rows.clamp(0, i32::MAX as i64) as i32).to_be_bytes());
-            (proto::F_EXECUTE, end(v))
-        }
-        ClientEvent::Sync => (proto::F_SYNC, end(begin(proto::F_SYNC, 0))),
-        ClientEvent::Close { kind, name } => {
-            let mut v = begin(proto::F_CLOSE, name.len() + 2);
-            v.push(kind);
-            cstr(&mut v, &name);
-            (proto::F_CLOSE, end(v))
-        }
-    };
-    out.push(ConnCommand::send(id, ts, tag, data));
-}
-
-pub struct ReplayManager {}
-
-impl ReplayManager {
-    pub fn new() -> Self {
-        Self {}
-    }
-
-    pub fn replay(
-        &mut self,
-        config: ReplayConfig,
-        mut reader: CaptureReader,
-    ) -> anyhow::Result<()> {
-        let stats = Arc::new(ReplayStats::new());
-
-        let stats_clone = stats.clone();
-        std::thread::spawn(move || {
+fn spawn_reporter(stats: Arc<ReplayStats>) {
+    std::thread::spawn(move || {
+        loop {
             sleep(Duration::from_secs(1));
-            loop {
-                let total = stats_clone.read_total_sent();
-                let pps = stats_clone.read_delta_sent();
-                let recv = stats_clone.read_delta_recv();
-                info!("Total sent: {total} Delta sent: {pps} Delta recv: {recv}");
-                sleep(Duration::from_secs(1));
-            }
-        });
+            info!(
+                "Total sent: {} Delta sent: {} Delta recv: {}",
+                stats.read_total_sent(),
+                stats.read_delta_sent(),
+                stats.read_delta_recv()
+            );
+        }
+    });
+}
 
-        let (cmd_tx, cmd_rx) = bounded::<ConnCommand>(QUEUE_CAP);
+pub fn replay(config: ReplayConfig, mut reader: CaptureReader) -> anyhow::Result<()> {
+    let config = Arc::new(config);
+    let stats = Arc::new(ReplayStats::new());
+    spawn_reporter(stats.clone());
 
-        let speed = config.speed.max(0.01);
-        let mut conn = ReplayLoop::new(config, cmd_rx, stats)?;
-        let waker = conn.waker();
-        let conn_handle = std::thread::spawn(move || conn.run());
+    let start = Instant::now();
+    let mut txs = Vec::new();
+    let mut handles = Vec::new();
+    for idx in 0..config.threads {
+        let (tx, rx) = bounded::<CaptureMessage>(QUEUE_CAP);
+        let mut worker = Worker::new(idx, config.clone(), rx, stats.clone(), start)?;
+        handles.push(std::thread::spawn(move || worker.run()));
+        txs.push(tx);
+    }
 
-        let mut out = Sink {
-            tx: &cmd_tx,
-            waker: &waker,
-            unwoken: 0,
-            ok: true,
-        };
+    let mut router = Router {
+        load: vec![0; txs.len()],
+        txs,
+        owner: HashMap::new(),
+        max_conns: config.max_conns,
+        skipped: 0,
+    };
 
-        let base = reader.start_ts;
-        let mut last = 0u64;
-        while out.ok {
-            match reader.read_event() {
-                Ok(Some(msg)) => {
-                    let rel = ((msg.ts.saturating_sub(base) as f64 / speed) as u64).max(last);
-                    last = rel;
-                    emit(msg, rel, &mut out);
+    let base = reader.start_ts;
+    let speed = config.speed.max(0.01);
+    let mut last = 0u64;
+    loop {
+        match reader.read_event() {
+            Ok(Some(mut msg)) => {
+                if matches!(
+                    msg.event,
+                    ClientEvent::Lsn { .. } | ClientEvent::TxEnd { .. }
+                ) {
+                    continue;
                 }
-                Ok(None) => break,
-                Err(e) => {
-                    error!("Failed to read capture: {e}");
+                last = ((msg.ts.saturating_sub(base) as f64 / speed) as u64).max(last);
+                msg.ts = last;
+                if !router.route(msg) {
+                    error!("worker thread gone");
                     break;
                 }
             }
+            Ok(None) => break,
+            Err(e) => {
+                error!("Failed to read capture: {e}");
+                break;
+            }
         }
-        out.wake();
-        drop(out);
-        drop(cmd_tx);
-
-        info!("Finished reading");
-        if conn_handle.join().is_err() {
-            error!("join failed, conn thread gone");
-        }
-
-        Ok(())
     }
+    router.finish(last);
+    info!("Finished reading");
+
+    for h in handles {
+        if h.join().is_err() {
+            error!("worker panicked");
+        }
+    }
+    Ok(())
 }
