@@ -17,9 +17,7 @@ use crate::utils::ReplayStats;
 
 const HORIZON_US: u64 = 1_000_000;
 const IDLE_US: u64 = 1_000;
-const TOLERANCE_US: u64 = 1_000;
-const LEAD_UP_DIV: u64 = 8;
-const LEAD_DOWN_US: u64 = 1;
+const LEAD_EMA_DIV: i64 = 16;
 const MAX_LEAD_US: u64 = 1_000_000;
 const READ_BUF: usize = 65536;
 
@@ -50,11 +48,9 @@ impl Clock {
 
     fn adjust(&self, late: u64) {
         let _ = self.lead.fetch_update(Relaxed, Relaxed, |l| {
-            Some(if late > TOLERANCE_US {
-                (l + late / LEAD_UP_DIV).min(MAX_LEAD_US)
-            } else {
-                l.saturating_sub(LEAD_DOWN_US)
-            })
+            let l = l as i64;
+            let next = l + (late as i64 - l) / LEAD_EMA_DIV;
+            Some((next.max(0) as u64).min(MAX_LEAD_US))
         });
     }
 }
@@ -278,8 +274,7 @@ impl Worker {
             }
         }
         let msg = self.slots.get_mut(&id)?.queue.pop_front()?;
-        self.clock
-            .adjust((now + self.clock.lead()).saturating_sub(msg.ts));
+        self.clock.adjust(now.saturating_sub(msg.ts));
         self.lag.add(now.saturating_sub(msg.ts));
         self.execute(msg);
         None
