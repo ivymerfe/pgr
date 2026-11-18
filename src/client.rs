@@ -7,8 +7,8 @@ use mio::net::TcpStream;
 use mio::{Interest, Registry, Token};
 use tracing::{error, info};
 
-use crate::capture::{ClientEvent, ClientId};
 use crate::proto::{self, Authentication, BackendMessage, Frame};
+use crate::readers::capture::{ClientEvent, ClientId};
 use crate::utils::{ReplayStats, Stream};
 
 const APPLICATION_NAME: &str = "pgr";

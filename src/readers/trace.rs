@@ -1,9 +1,9 @@
 use std::{
     fs::File,
-    io::{self, BufReader, Read},
+    io::{self, Read},
 };
 
-use crate::capture::ClientId;
+use crate::readers::{capture::ClientId, zstd::{ZReader, open_zstd}};
 
 #[derive(Clone, Copy)]
 pub struct TraceData {
@@ -14,14 +14,14 @@ pub struct TraceData {
 }
 
 pub struct TraceReader {
-    reader: BufReader<File>,
+    reader: ZReader,
 }
 
 impl TraceReader {
-    pub fn new(file: File) -> Self {
-        Self {
-            reader: BufReader::new(file),
-        }
+    pub fn new(file: File) -> io::Result<Self> {
+        Ok(Self {
+            reader: open_zstd(file)?,
+        })
     }
 
     pub fn next(&mut self) -> io::Result<TraceData> {

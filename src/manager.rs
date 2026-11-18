@@ -7,8 +7,10 @@ use crate::worker::{Clock, Worker};
 use crossbeam_channel::{Sender, bounded};
 use tracing::{error, info};
 
-use crate::capture::{CaptureMessage, CaptureReader, ClientEvent, ClientId};
 use crate::client::ReplayConfig;
+use crate::readers::capture::{
+    CaptureMessage, CaptureReader, ClientEvent, ClientId, MSG_DISCONNECT,
+};
 use crate::utils::ReplayStats;
 
 const QUEUE_CAP: usize = 16384;
@@ -55,7 +57,12 @@ impl Router {
         }
         for (id, idx) in self.owner {
             let event = ClientEvent::Disconnect;
-            let _ = self.txs[idx].send(CaptureMessage { id, ts, event });
+            let _ = self.txs[idx].send(CaptureMessage {
+                id,
+                ts,
+                event_type: MSG_DISCONNECT,
+                event,
+            });
         }
     }
 }

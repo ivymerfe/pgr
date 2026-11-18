@@ -1,49 +1,14 @@
-use std::{
-    collections::VecDeque,
-    fs::File,
-    io::{self, BufReader, Read},
-};
+use std::collections::VecDeque;
 
 use ahash::AHashMap;
 use anyhow::anyhow;
 use tracing::{info, warn};
 
-use crate::capture::{
-    CaptureReader, ClientEvent, ClientId, MSG_BIND, MSG_CLOSE, MSG_CONNECT, MSG_DISCONNECT,
-    MSG_EXECUTE, MSG_PARSE, MSG_SIMPLE_QUERY, MSG_SYNC,
+use crate::readers::capture::{
+    CaptureReader, ClientEvent, ClientId, MSG_CONNECT, MSG_DISCONNECT, MSG_LSN, MSG_SIMPLE_QUERY,
+    MSG_TX_END,
 };
-
-pub struct TimingData {
-    pub id: ClientId,
-    pub event_type: u8,
-    pub ts: u64,
-}
-
-pub struct TimingReader {
-    reader: BufReader<File>,
-}
-
-impl TimingReader {
-    pub fn new(file: File) -> Self {
-        Self {
-            reader: BufReader::new(file),
-        }
-    }
-
-    pub fn next(&mut self) -> io::Result<Option<TimingData>> {
-        let mut buf = [0u8; 13];
-        match self.reader.read_exact(&mut buf) {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
-            Err(e) => return Err(e),
-        }
-        Ok(Some(TimingData {
-            id: u32::from_le_bytes(buf[0..4].try_into().unwrap()),
-            event_type: buf[4],
-            ts: u64::from_le_bytes(buf[5..13].try_into().unwrap()),
-        }))
-    }
-}
+use crate::readers::timings::TimingReader;
 
 #[derive(Default, Clone, Copy)]
 struct Dev {
@@ -92,20 +57,6 @@ struct ClientStats {
 
 fn dev(p: (u64, u64), a: (u64, u64)) -> i64 {
     (p.1 as i64 - a.1 as i64) - (p.0 as i64 - a.0 as i64)
-}
-
-fn event_code(e: &ClientEvent) -> Option<u8> {
-    match e {
-        ClientEvent::Connect { .. } => Some(MSG_CONNECT),
-        ClientEvent::Disconnect => Some(MSG_DISCONNECT),
-        ClientEvent::SimpleQuery { .. } => Some(MSG_SIMPLE_QUERY),
-        ClientEvent::Parse { .. } => Some(MSG_PARSE),
-        ClientEvent::Bind { .. } => Some(MSG_BIND),
-        ClientEvent::Execute { .. } => Some(MSG_EXECUTE),
-        ClientEvent::Sync => Some(MSG_SYNC),
-        ClientEvent::Close { .. } => Some(MSG_CLOSE),
-        ClientEvent::Lsn { .. } | ClientEvent::TxEnd { .. } => None,
-    }
 }
 
 fn drain(c: &mut ClientStats, origin: &mut Option<(u64, u64)>) {
@@ -162,7 +113,8 @@ pub fn compare(
         while !capture_eof && !clients[&t.id].tim.is_empty() {
             match capture_reader.read_event() {
                 Ok(Some(msg)) => {
-                    if let Some(code) = event_code(&msg.event) {
+                    let code = msg.event_type;
+                    if code != MSG_LSN && code != MSG_TX_END {
                         let restore = matches!(
                             &msg.event,
                             ClientEvent::Connect { session_id } if !session_id.is_empty()

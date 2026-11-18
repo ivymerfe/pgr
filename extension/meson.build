@@ -30,9 +30,12 @@ pg_inc = include_directories(r_inc.stdout().strip())
 pg_libdir = r_lib.stdout().strip()
 pg_sharedir = r_share.stdout().strip()
 
+zstd_dep = dependency('libzstd')
+
 shared_module('pgr',
   sources,
   include_directories: pg_inc,
+  dependencies: [zstd_dep],
   name_prefix: '',
   install: true,
   install_dir: pg_libdir

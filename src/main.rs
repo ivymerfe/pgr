@@ -12,19 +12,18 @@ use tracing::{error, info};
 use tracing_subscriber::fmt::time::OffsetTime;
 
 use crate::analyzer::StorageWriter;
-use crate::capture::CaptureReader;
 use crate::client::ReplayConfig;
-use crate::compare::TimingReader;
-use crate::trace_reader::TraceReader;
+use crate::readers::capture::CaptureReader;
+use crate::readers::timings::TimingReader;
+use crate::readers::trace::TraceReader;
 
 mod analyzer;
-mod capture;
-mod capture_dump;
 mod client;
 mod compare;
+mod dump;
 mod manager;
 mod proto;
-mod trace_reader;
+mod readers;
 mod utils;
 mod viewer;
 mod worker;
@@ -195,12 +194,12 @@ fn run_command(cli: Cli) -> anyhow::Result<()> {
             let reader = CaptureReader::new(file)?;
             let output_file = try_create(&output, "csv")?;
             info!("Dumping {} -> {}", input.display(), output.display());
-            capture_dump::dump(reader, output_file)?;
+            dump::dump(reader, output_file)?;
             info!("Done");
         }
         Commands::Compare { capture, timing } => {
             let capture_reader = CaptureReader::new(try_open(&capture)?)?;
-            let timing_reader = TimingReader::new(try_open(&timing)?);
+            let timing_reader = TimingReader::new(try_open(&timing)?)?;
             info!("Comparing {} <-> {}", capture.display(), timing.display());
             let start = Instant::now();
             compare::compare(capture_reader, timing_reader)?;
@@ -222,7 +221,7 @@ fn run_command(cli: Cli) -> anyhow::Result<()> {
         } => {
             let capture_file = try_open(&capture)?;
             let capture_reader = CaptureReader::new(capture_file)?;
-            let trace_reader = TraceReader::new(File::open(&trace)?);
+            let trace_reader = TraceReader::new(File::open(&trace)?)?;
             let storage = StorageWriter::new(&output, chunk_secs)?;
             info!("Capture: {}", capture.display());
             info!("Trace: {}", trace.display());

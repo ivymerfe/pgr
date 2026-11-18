@@ -11,8 +11,8 @@ use mio::{Events, Poll};
 use quanta::Instant;
 use tracing::{error, info};
 
-use crate::capture::{CaptureMessage, ClientEvent, ClientId};
 use crate::client::{ReplayClient, ReplayConfig};
+use crate::readers::capture::{CaptureMessage, ClientEvent, ClientId};
 use crate::utils::ReplayStats;
 
 const HORIZON_US: u64 = 1_000_000;

@@ -12,7 +12,7 @@
 
 #include <stdio.h>
 
-#define BUFFER_SIZE (1024 * 1024)
+#include <zstd.h>
 
 typedef struct {
   const char* name;
@@ -28,11 +28,48 @@ static const ChannelDesc Descs[ChanCount] = {
 };
 
 static FILE* File = NULL;
-static char ChannelBuffer[BUFFER_SIZE];
+static char ChannelBuffer[1024 * 1024];
+static ZSTD_CCtx* Zctx = NULL;
+static char ZOut[256 * 1024];
+
 static uint32 WorkerGeneration = 0;
+
+static void z_check(size_t r) {
+  if (ZSTD_isError(r)) {
+    ereport(ERROR, (errmsg("pgr: zstd error: %s", ZSTD_getErrorName(r))));
+  }
+}
+
+static void z_emit(const ZSTD_outBuffer* out) {
+  if (out->pos > 0 && fwrite(ZOut, 1, out->pos, File) != out->pos) {
+    ereport(ERROR, (errmsg("pgr: write failed")));
+  }
+}
+
+static void z_write(const char* data, size_t len) {
+  ZSTD_inBuffer in = {data, len, 0};
+  while (in.pos < in.size) {
+    ZSTD_outBuffer out = {ZOut, sizeof(ZOut), 0};
+    z_check(ZSTD_compressStream(Zctx, &out, &in));
+    z_emit(&out);
+  }
+}
+
+static void z_finish(void) {
+  size_t rem;
+  do {
+    ZSTD_outBuffer out = {ZOut, sizeof(ZOut), 0};
+    rem = ZSTD_endStream(Zctx, &out);
+    z_check(rem);
+    z_emit(&out);
+  } while (rem != 0);
+}
 
 static void close_file() {
   if (File != NULL) {
+    z_finish();
+    ZSTD_freeCCtx(Zctx);
+    Zctx = NULL;
     fclose(File);
     File = NULL;
   }
@@ -47,7 +84,13 @@ static void open_file(ChannelKind k) {
   if (f == NULL) {
     ereport(ERROR, (errmsg("pgr: could not open file %s", path)));
   }
-  setvbuf(f, NULL, _IOFBF, 64 * 1024);
+  ZSTD_CCtx* z = ZSTD_createCCtx();
+  if (z == NULL) {
+    fclose(f);
+    ereport(ERROR, (errmsg("pgr: could not create zstd context")));
+  }
+  ZSTD_CCtx_setParameter(z, ZSTD_c_compressionLevel, 3);
+  Zctx = z;
   File = f;
 }
 
@@ -55,7 +98,7 @@ static int write_events(ChannelKind k) {
   Channel* ch = &Shmem->channels[k];
   int count = 0;
   uint32 len;
-  while (ring_pop(&ch->ring, ChannelBuffer, BUFFER_SIZE, &len) == RingOk) {
+  while (ring_pop(&ch->ring, ChannelBuffer, sizeof(ChannelBuffer), &len) == RingOk) {
     count++;
     if (File == NULL) {
       if (Descs[k].open_on == 0 || ChannelBuffer[0] != Descs[k].open_on ||
@@ -64,10 +107,7 @@ static int write_events(ChannelKind k) {
       }
       open_file(k);
     }
-    fwrite(ChannelBuffer, len, 1, File);
-  }
-  if (File != NULL) {
-    fflush(File);
+    z_write(ChannelBuffer, len);
   }
   return count;
 }

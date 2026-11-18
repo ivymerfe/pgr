@@ -3,7 +3,7 @@ use std::{
     io::{self, BufWriter, Write},
 };
 
-use crate::capture::{CaptureReader, ClientEvent};
+use crate::readers::capture::{CaptureReader, ClientEvent};
 
 fn ts(w: &mut impl Write, ts: u64, base: u64) -> io::Result<()> {
     let d = ts as i64 - base as i64;

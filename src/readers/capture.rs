@@ -1,7 +1,9 @@
 use std::{
     fs::File,
-    io::{self, BufReader, Read},
+    io::{self, Read},
 };
+
+use crate::readers::zstd::{ZReader, open_zstd};
 
 pub type ClientId = u32;
 
@@ -62,11 +64,12 @@ pub enum ClientEvent {
 pub struct CaptureMessage {
     pub id: ClientId,
     pub ts: u64,
+    pub event_type: u8,
     pub event: ClientEvent,
 }
 
 pub struct CaptureReader {
-    buf: BufReader<File>,
+    buf: ZReader,
     pub lsn: u64,
     pub start_ts: u64,
 }
@@ -74,7 +77,7 @@ pub struct CaptureReader {
 impl CaptureReader {
     pub fn new(file: File) -> io::Result<Self> {
         let mut r = Self {
-            buf: BufReader::new(file),
+            buf: open_zstd(file)?,
             lsn: 0,
             start_ts: 0,
         };
@@ -211,6 +214,11 @@ impl CaptureReader {
                 ));
             }
         };
-        Ok(CaptureMessage { id, ts, event })
+        Ok(CaptureMessage {
+            id,
+            ts,
+            event_type: t,
+            event,
+        })
     }
 }

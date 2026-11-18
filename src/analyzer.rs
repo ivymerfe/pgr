@@ -10,9 +10,9 @@ use ahash::{AHashMap, AHasher};
 use anyhow::anyhow;
 use tracing::{error, info, warn};
 
-use crate::{
+use crate::readers::{
     capture::{BindParam, CaptureMessage, CaptureReader, ClientEvent, ClientId},
-    trace_reader::{TraceData, TraceReader},
+    trace::{TraceData, TraceReader},
 };
 
 pub const NO_PARAMS: usize = u64::MAX as usize;
