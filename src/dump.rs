@@ -3,7 +3,12 @@ use std::{
     io::{self, BufWriter, Write},
 };
 
-use crate::readers::capture::{CaptureReader, ClientEvent};
+use crate::readers::{
+    capture::*,
+    session::{SessionReader, SessionRecord, parse_copy},
+    timings::TimingReader,
+    trace::TraceReader,
+};
 
 fn ts(w: &mut impl Write, ts: u64, base: u64) -> io::Result<()> {
     let d = ts as i64 - base as i64;
@@ -45,7 +50,7 @@ fn list<T: std::fmt::Display>(w: &mut impl Write, v: &[T]) -> io::Result<()> {
     w.write_all(b"\"")
 }
 
-pub fn dump(mut reader: CaptureReader, output: File) -> anyhow::Result<()> {
+pub fn dump_capture(mut reader: CaptureReader, output: File) -> anyhow::Result<()> {
     let mut w = BufWriter::new(output);
     let base = reader.start_ts;
     w.write_all(b"timestamp,client_id,message,fields\n")?;
@@ -123,6 +128,135 @@ pub fn dump(mut reader: CaptureReader, output: File) -> anyhow::Result<()> {
         w.write_all(b"\n")?;
     }
 
+    w.flush()?;
+    Ok(())
+}
+
+fn msg_name(t: u8) -> &'static str {
+    match t {
+        MSG_LSN => "lsn",
+        MSG_CONNECT => "connect",
+        MSG_DISCONNECT => "disconnect",
+        MSG_SIMPLE_QUERY => "simple_query",
+        MSG_PARSE => "parse",
+        MSG_BIND => "bind",
+        MSG_EXECUTE => "execute",
+        MSG_SYNC => "sync",
+        MSG_TX_END => "tx_end",
+        MSG_CLOSE => "close",
+        _ => "unknown",
+    }
+}
+
+pub fn dump_trace(mut reader: TraceReader, output: File) -> anyhow::Result<()> {
+    let mut w = BufWriter::new(output);
+    w.write_all(b"client_id,frame_index,duration_us,event\n")?;
+    loop {
+        let d = match reader.next() {
+            Ok(d) => d,
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(e.into()),
+        };
+        writeln!(
+            w,
+            "{},{},{},{}",
+            d.id, d.frame_index, d.duration_us, d.event_type as char
+        )?;
+    }
+    w.flush()?;
+    Ok(())
+}
+
+pub fn dump_timings(mut reader: TimingReader, output: File) -> anyhow::Result<()> {
+    let mut w = BufWriter::new(output);
+    w.write_all(b"timestamp,client_id,message\n")?;
+    while let Some(d) = reader.next()? {
+        writeln!(w, "{},{},{}", d.ts, d.id, msg_name(d.event_type))?;
+    }
+    w.flush()?;
+    Ok(())
+}
+
+fn field(w: &mut impl Write, v: &Option<Vec<u8>>) -> io::Result<()> {
+    match v {
+        None => w.write_all(b"NULL"),
+        Some(b) => match std::str::from_utf8(b) {
+            Ok(s) if !s.is_empty() && !s.chars().any(|c| c.is_control()) => {
+                write!(w, "{:?}", s)
+            }
+            _ => {
+                w.write_all(b"0x")?;
+                for x in b {
+                    write!(w, "{:02x}", x)?;
+                }
+                Ok(())
+            }
+        },
+    }
+}
+
+pub fn dump_session(mut reader: SessionReader, output: File) -> anyhow::Result<()> {
+    let mut w = BufWriter::new(output);
+    let mut table: Option<(String, String, String, Vec<u8>)> = None;
+    while let Some(r) = reader.next()? {
+        match r {
+            SessionRecord::GucSet { name, value } => {
+                writeln!(w, "guc {} = {:?}", name, value)?;
+            }
+            SessionRecord::GucReset { name } => {
+                writeln!(w, "guc-reset {}", name)?;
+            }
+            SessionRecord::PrepPut {
+                name,
+                from_sql,
+                query,
+                param_types,
+            } => {
+                writeln!(
+                    w,
+                    "prepared {:?} from_sql={} types={:?} query={:?}",
+                    name, from_sql, param_types, query
+                )?;
+            }
+            SessionRecord::PrepDrop { name } => {
+                writeln!(w, "prepared-drop {:?}", name)?;
+            }
+            SessionRecord::TableBegin {
+                name,
+                columns,
+                post,
+            } => {
+                table = Some((name, columns, post, Vec::new()));
+            }
+            SessionRecord::TableChunk(c) => {
+                if let Some(t) = table.as_mut() {
+                    t.3.extend_from_slice(&c);
+                }
+            }
+            SessionRecord::TableEnd => {
+                if let Some((name, columns, post, data)) = table.take() {
+                    let rows = parse_copy(&data)?;
+                    writeln!(w, "table {}", name)?;
+                    writeln!(w, "  columns: {}", columns)?;
+                    writeln!(w, "  post: {}", post)?;
+                    writeln!(w, "  rows: {} bytes: {}", rows.len(), data.len())?;
+                    for row in &rows {
+                        w.write_all(b"  ")?;
+                        for (i, v) in row.iter().enumerate() {
+                            if i > 0 {
+                                w.write_all(b" | ")?;
+                            }
+                            field(&mut w, v)?;
+                        }
+                        w.write_all(b"\n")?;
+                    }
+                }
+            }
+            SessionRecord::TableDrop { name } => {
+                writeln!(w, "table-drop {}", name)?;
+            }
+        }
+    }
     w.flush()?;
     Ok(())
 }

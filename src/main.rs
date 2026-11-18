@@ -14,6 +14,7 @@ use tracing_subscriber::fmt::time::OffsetTime;
 use crate::analyzer::StorageWriter;
 use crate::client::ReplayConfig;
 use crate::readers::capture::CaptureReader;
+use crate::readers::session::SessionReader;
 use crate::readers::timings::TimingReader;
 use crate::readers::trace::TraceReader;
 
@@ -82,13 +83,13 @@ enum Commands {
         )]
         max_rps: u32,
     },
-    #[command(about = "Dump a capture to CSV")]
+    #[command(about = "Dump a capture, trace, timing or session file to text")]
     Dump {
-        #[arg(help = "Capture")]
+        #[arg(help = "Input file (.pr, .ptr, .ptm, .pgs)")]
         input: PathBuf,
 
-        #[arg(short, long, default_value = "capture.csv", value_parser = parse_absolute, help = "Output CSV path")]
-        output: PathBuf,
+        #[arg(short, long, value_parser = parse_absolute, help = "Output path")]
+        output: Option<PathBuf>,
     },
     #[command(about = "Compare capture timings with replay timings")]
     Compare {
@@ -190,11 +191,40 @@ fn run_command(cli: Cli) -> anyhow::Result<()> {
             manager::replay(config, reader)?;
         }
         Commands::Dump { input, output } => {
+            let output = output.unwrap_or_else(|| {
+                let mut name = input.file_name().unwrap_or_default().to_os_string();
+                name.push(".csv");
+                PathBuf::from(name)
+            });
+            let ext = input.extension().and_then(|e| e.to_str()).unwrap_or("");
             let file = try_open(&input)?;
-            let reader = CaptureReader::new(file)?;
-            let output_file = try_create(&output, "csv")?;
-            info!("Dumping {} -> {}", input.display(), output.display());
-            dump::dump(reader, output_file)?;
+            match ext {
+                "pr" => {
+                    let reader = CaptureReader::new(file)?;
+                    let out = try_create(&output, "csv")?;
+                    info!("Dumping {} -> {}", input.display(), output.display());
+                    dump::dump_capture(reader, out)?;
+                }
+                "ptr" => {
+                    let reader = TraceReader::new(file)?;
+                    let out = try_create(&output, "csv")?;
+                    info!("Dumping {} -> {}", input.display(), output.display());
+                    dump::dump_trace(reader, out)?;
+                }
+                "ptm" => {
+                    let reader = TimingReader::new(file)?;
+                    let out = try_create(&output, "csv")?;
+                    info!("Dumping {} -> {}", input.display(), output.display());
+                    dump::dump_timings(reader, out)?;
+                }
+                "pgs" => {
+                    let reader = SessionReader::new(file)?;
+                    let out = try_create(&output, "txt")?;
+                    info!("Dumping {} -> {}", input.display(), output.display());
+                    dump::dump_session(reader, out)?;
+                }
+                _ => anyhow::bail!("Unknown file extension: '{}'", ext),
+            }
             info!("Done");
         }
         Commands::Compare { capture, timing } => {
