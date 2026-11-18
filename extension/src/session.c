@@ -17,18 +17,59 @@
 #include "tcop/utility.h"
 #include "utils/builtins.h"
 #include "utils/guc_tables.h"
+#include "utils/hsearch.h"
+#include "utils/memutils.h"
 #include "utils/plancache.h"
 #include "utils/snapmgr.h"
 
-#define SQL_ALL \
-  "SELECT relid, table_name, columns_ddl, post_ddl FROM pgr.ttdescribe()"
+#include <zstd.h>
 
-enum { SessGucs = 1, SessPrepared, SessTable };
+#define SQL_ALL                                                       \
+  "SELECT t.relid, t.table_name, t.columns_ddl, t.post_ddl, "         \
+  "c.relfilenode FROM pgr.ttdescribe() t JOIN pg_class c ON c.oid = " \
+  "t.relid"
+
+#define KeyLen 128
+#define ChunkSize (1024 * 1024)
+
+enum {
+  SessGucSet = 1,
+  SessGucReset,
+  SessPrepPut,
+  SessPrepDrop,
+  SessTableBegin,
+  SessTableChunk,
+  SessTableEnd,
+  SessTableDrop,
+};
+
+typedef struct {
+  char key[KeyLen];
+  char* data;
+  uint32 len;
+  bool seen;
+} Kv;
 
 static FILE* SessionFile = NULL;
 static char SessionPath[MAXPGPATH];
+static ZSTD_CCtx* Zctx = NULL;
+static char ZOut[128 * 1024];
+static bool FrameOpen = false;
+
+static MemoryContext StateCxt = NULL;
+static HTAB* Gucs = NULL;
+static HTAB* Preps = NULL;
+static HTAB* Tables = NULL;
+static HTAB* Dirty = NULL;
+static HTAB* Pending = NULL;
+static StringInfoData ChunkBuf;
+
 static FILE* ReadFile = NULL;
-static uint64 ReadLeft = 0;
+static ZSTD_DCtx* Dctx = NULL;
+static char ZIn[128 * 1024];
+static ZSTD_inBuffer In = {ZIn, 0, 0};
+static uint32 ChunkLeft = 0;
+static bool ChunkDone = false;
 
 static void session_path(const char* name, char* path) {
   const char* slash = strchr(name, '/');
@@ -45,33 +86,55 @@ static void session_path(const char* name, char* path) {
   snprintf(path, MAXPGPATH, "sessions/%s.pgs", name);
 }
 
-static void wr(const void* p, size_t n) {
-  if (fwrite(p, 1, n, SessionFile) != n) {
+static const char* nz(const char* s) {
+  return s ? s : "";
+}
+
+static void z_check(size_t r) {
+  if (ZSTD_isError(r)) {
+    ereport(ERROR, (errmsg("pgr: zstd error: %s", ZSTD_getErrorName(r))));
+  }
+}
+
+static void z_emit(const ZSTD_outBuffer* out) {
+  if (out->pos > 0 && fwrite(ZOut, 1, out->pos, SessionFile) != out->pos) {
     ereport(ERROR,
             (errcode_for_file_access(), errmsg("pgr: write failed: %m")));
   }
 }
 
-static void wr_u32(uint32 v) {
-  wr(&v, sizeof(v));
+static void z_write(const void* data, size_t len) {
+  FrameOpen = true;
+  ZSTD_inBuffer in = {data, len, 0};
+  while (in.pos < in.size) {
+    ZSTD_outBuffer out = {ZOut, sizeof(ZOut), 0};
+    z_check(ZSTD_compressStream(Zctx, &out, &in));
+    z_emit(&out);
+  }
 }
 
-static void wr_str(const char* s) {
-  uint32 n = s ? (uint32)strlen(s) : 0;
-  wr_u32(n);
-  if (n) {
-    wr(s, n);
+static void z_finish(void) {
+  if (!FrameOpen) {
+    return;
   }
+  size_t rem;
+  do {
+    ZSTD_outBuffer out = {ZOut, sizeof(ZOut), 0};
+    rem = ZSTD_endStream(Zctx, &out);
+    z_check(rem);
+    z_emit(&out);
+  } while (rem != 0);
+  FrameOpen = false;
+  fflush(SessionFile);
 }
 
 static void put_rec(uint8 type, StringInfo b) {
-  uint64 len = b ? (uint64)b->len : 0;
-  wr(&type, sizeof(type));
-  wr(&len, sizeof(len));
+  uint32 len = b ? (uint32)b->len : 0;
+  z_write(&type, sizeof(type));
+  z_write(&len, sizeof(len));
   if (len) {
-    wr(b->data, len);
+    z_write(b->data, len);
   }
-  fflush(SessionFile);
 }
 
 static void sb_raw(StringInfo b, const void* p, size_t n) {
@@ -99,6 +162,99 @@ static void sb_str(StringInfo b, const char* s) {
   sb_bytes(b, s, (uint32)strlen(s));
 }
 
+static HTAB* kv_new(const char* name, MemoryContext cx) {
+  HASHCTL ctl;
+  memset(&ctl, 0, sizeof(ctl));
+  ctl.keysize = KeyLen;
+  ctl.entrysize = sizeof(Kv);
+  ctl.hcxt = cx;
+  return hash_create(name, 64, &ctl, HASH_ELEM | HASH_STRINGS | HASH_CONTEXT);
+}
+
+static bool kv_put(HTAB* h,
+                   MemoryContext cx,
+                   const char* key,
+                   const char* data,
+                   uint32 len) {
+  bool found;
+  Kv* e = hash_search(h, key, HASH_ENTER, &found);
+  if (!found) {
+    e->data = NULL;
+    e->len = 0;
+  }
+  e->seen = true;
+  if (e->data != NULL && e->len == len && memcmp(e->data, data, len) == 0) {
+    return false;
+  }
+  if (e->data != NULL) {
+    pfree(e->data);
+  }
+  e->data = MemoryContextAlloc(cx, len + 1);
+  memcpy(e->data, data, len);
+  e->len = len;
+  return true;
+}
+
+static void kv_sweep(HTAB* h, uint8 type) {
+  HASH_SEQ_STATUS s;
+  Kv* e;
+  StringInfoData b;
+  initStringInfo(&b);
+  hash_seq_init(&s, h);
+  while ((e = hash_seq_search(&s)) != NULL) {
+    if (e->seen) {
+      e->seen = false;
+      continue;
+    }
+    resetStringInfo(&b);
+    sb_str(&b, e->key);
+    put_rec(type, &b);
+    pfree(e->data);
+    hash_search(h, e->key, HASH_REMOVE, NULL);
+  }
+  pfree(b.data);
+}
+
+static HTAB* oid_set_new(void) {
+  HASHCTL ctl;
+  memset(&ctl, 0, sizeof(ctl));
+  ctl.keysize = sizeof(Oid);
+  ctl.entrysize = sizeof(Oid);
+  ctl.hcxt = StateCxt;
+  return hash_create("pgr oids", 64, &ctl,
+                     HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+}
+
+static void oid_set_clear(HTAB* h) {
+  HASH_SEQ_STATUS s;
+  Oid* e;
+  hash_seq_init(&s, h);
+  while ((e = hash_seq_search(&s)) != NULL) {
+    hash_search(h, e, HASH_REMOVE, NULL);
+  }
+}
+
+void session_mark_dirty(Oid relid) {
+  if (Pending != NULL) {
+    hash_search(Pending, &relid, HASH_ENTER, NULL);
+  }
+}
+
+void session_xact_end(bool committed) {
+  if (Pending == NULL) {
+    return;
+  }
+  HASH_SEQ_STATUS s;
+  Oid* e;
+  hash_seq_init(&s, Pending);
+  while ((e = hash_seq_search(&s)) != NULL) {
+    if (committed) {
+      hash_search(Dirty, e, HASH_ENTER, NULL);
+    }
+    hash_search(Pending, e, HASH_REMOVE, NULL);
+  }
+}
+
 static bool guc_is_session_state(struct config_generic* guc) {
   if (guc->context == PGC_INTERNAL || guc->context == PGC_POSTMASTER) {
     return false;
@@ -106,22 +262,25 @@ static bool guc_is_session_state(struct config_generic* guc) {
   return guc->source >= PGC_S_DATABASE && guc->source != PGC_S_OVERRIDE;
 }
 
-static void build_gucs(StringInfo b) {
+static void delta_gucs(void) {
   int num_vars;
   struct config_generic** gucs = get_guc_variables(&num_vars);
-  size_t pos = b->len;
-  uint32 count = 0;
-  sb_u32(b, 0);
+  StringInfoData b;
+  initStringInfo(&b);
   for (int i = 0; i < num_vars; i++) {
     if (!guc_is_session_state(gucs[i])) {
       continue;
     }
-    char* val = ShowGUCOption(gucs[i], false);
-    sb_str(b, gucs[i]->name);
-    sb_str(b, val ? val : "");
-    count++;
+    const char* val = nz(ShowGUCOption(gucs[i], false));
+    if (kv_put(Gucs, StateCxt, gucs[i]->name, val, strlen(val) + 1)) {
+      resetStringInfo(&b);
+      sb_str(&b, gucs[i]->name);
+      sb_str(&b, val);
+      put_rec(SessGucSet, &b);
+    }
   }
-  memcpy(b->data + pos, &count, sizeof(count));
+  kv_sweep(Gucs, SessGucReset);
+  pfree(b.data);
 }
 
 static void sb_plansource(StringInfo b,
@@ -147,95 +306,106 @@ static void sb_plansource(StringInfo b,
   }
 }
 
-typedef struct {
-  StringInfo b;
-  uint32 n;
-} PrepCtx;
-
 static void each_prepared(PreparedStatement* ps, void* arg) {
-  PrepCtx* c = arg;
-  sb_plansource(c->b, ps->stmt_name, ps->from_sql, ps->plansource);
-  c->n++;
-}
-
-static void build_prepared(StringInfo b) {
-  PrepCtx c = {b, 0};
-  size_t pos = b->len;
-  sb_u32(b, 0);
-  CachedPlanSource* unnamed = GetUnnamedStatementSource();
-  if (unnamed) {
-    sb_plansource(b, "", false, unnamed);
-    c.n++;
+  StringInfo b = arg;
+  resetStringInfo(b);
+  sb_plansource(b, ps->stmt_name, ps->from_sql, ps->plansource);
+  if (kv_put(Preps, StateCxt, ps->stmt_name, b->data, b->len)) {
+    put_rec(SessPrepPut, b);
   }
-  ForEachPreparedStatement(each_prepared, &c);
-  memcpy(b->data + pos, &c.n, sizeof(c.n));
 }
 
-static void write_state(void) {
-  StringInfoData cur;
-  initStringInfo(&cur);
-  build_gucs(&cur);
-  put_rec(SessGucs, &cur);
-  resetStringInfo(&cur);
-  build_prepared(&cur);
-  put_rec(SessPrepared, &cur);
-  pfree(cur.data);
+static void delta_prepared(void) {
+  StringInfoData b;
+  initStringInfo(&b);
+  ForEachPreparedStatement(each_prepared, &b);
+  kv_sweep(Preps, SessPrepDrop);
+  pfree(b.data);
+}
+
+static void flush_chunk(void) {
+  if (ChunkBuf.len > 0) {
+    put_rec(SessTableChunk, &ChunkBuf);
+    resetStringInfo(&ChunkBuf);
+  }
 }
 
 static void dump_cb(void* data, int len) {
-  wr(data, len);
+  appendBinaryStringInfo(&ChunkBuf, data, len);
+  if (ChunkBuf.len >= ChunkSize) {
+    flush_chunk();
+  }
 }
 
-static void dump_tables(const char* sql) {
+static void dump_table(Oid relid,
+                       const char* tname,
+                       const char* cols,
+                       const char* post) {
+  StringInfoData b;
+  initStringInfo(&b);
+  sb_str(&b, tname);
+  sb_str(&b, cols);
+  sb_str(&b, post);
+  put_rec(SessTableBegin, &b);
+  pfree(b.data);
+
+  initStringInfo(&ChunkBuf);
+  Relation rel = table_open(relid, AccessShareLock);
+  ParseState* pstate = make_parsestate(NULL);
+  List* opts =
+      list_make1(makeDefElem("format", (Node*)makeString("binary"), -1));
+  CopyToState cs =
+      BeginCopyTo(pstate, rel, NULL, relid, NULL, false, dump_cb, NIL, opts);
+  DoCopyTo(cs);
+  EndCopyTo(cs);
+  free_parsestate(pstate);
+  table_close(rel, AccessShareLock);
+  flush_chunk();
+  pfree(ChunkBuf.data);
+  put_rec(SessTableEnd, NULL);
+}
+
+static void delta_tables(void) {
   if (SPI_connect() != SPI_OK_CONNECT) {
     elog(ERROR, "pgr: SPI_connect failed");
   }
-  if (SPI_execute(sql, true, 0) != SPI_OK_SELECT) {
+  if (SPI_execute(SQL_ALL, true, 0) != SPI_OK_SELECT) {
     elog(ERROR, "pgr: ttdescribe failed");
   }
 
   uint64 n = SPI_processed;
   SPITupleTable* tt = SPI_tuptable;
+  StringInfoData sig;
+  initStringInfo(&sig);
 
   for (uint64 i = 0; i < n; i++) {
     HeapTuple t = tt->vals[i];
     bool isnull;
     Oid relid = DatumGetObjectId(SPI_getbinval(t, tt->tupdesc, 1, &isnull));
-    uint8 type = SessTable;
-    uint64 zero = 0;
+    const char* tname = nz(SPI_getvalue(t, tt->tupdesc, 2));
+    const char* cols = nz(SPI_getvalue(t, tt->tupdesc, 3));
+    const char* post = nz(SPI_getvalue(t, tt->tupdesc, 4));
+    const char* fnode = nz(SPI_getvalue(t, tt->tupdesc, 5));
 
-    wr(&type, sizeof(type));
-    wr(&zero, sizeof(zero));
-    off_t start = ftello(SessionFile);
-
-    wr_str(SPI_getvalue(t, tt->tupdesc, 2));
-    wr_str(SPI_getvalue(t, tt->tupdesc, 3));
-    wr_str(SPI_getvalue(t, tt->tupdesc, 4));
-
-    Relation rel = table_open(relid, AccessShareLock);
-    ParseState* pstate = make_parsestate(NULL);
-    List* opts =
-        list_make1(makeDefElem("format", (Node*)makeString("binary"), -1));
-    CopyToState cs =
-        BeginCopyTo(pstate, rel, NULL, relid, NULL, false, dump_cb, NIL, opts);
-    DoCopyTo(cs);
-    EndCopyTo(cs);
-    free_parsestate(pstate);
-    table_close(rel, AccessShareLock);
-
-    off_t end = ftello(SessionFile);
-    uint64 len = (uint64)(end - start);
-    fseeko(SessionFile, start - (off_t)sizeof(uint64), SEEK_SET);
-    wr(&len, sizeof(len));
-    fseeko(SessionFile, end, SEEK_SET);
+    resetStringInfo(&sig);
+    appendStringInfo(&sig, "%u/%s/%s/%s", relid, fnode, cols, post);
+    bool changed = kv_put(Tables, StateCxt, tname, sig.data, sig.len);
+    bool dirty = hash_search(Dirty, &relid, HASH_FIND, NULL) != NULL;
+    if (changed || dirty) {
+      dump_table(relid, tname, cols, post);
+    }
   }
-  fflush(SessionFile);
+  kv_sweep(Tables, SessTableDrop);
+  oid_set_clear(Dirty);
+  pfree(sig.data);
   SPI_finish();
 }
 
 static void start_body(void) {
-  write_state();
-  dump_tables(SQL_ALL);
+  delta_gucs();
+  delta_prepared();
+  delta_tables();
+  z_finish();
 }
 
 static bool guarded(void (*fn)(void)) {
@@ -298,10 +468,25 @@ bool session_active(void) {
 }
 
 void session_stop(void) {
-  if (SessionFile != NULL) {
-    fclose(SessionFile);
-    SessionFile = NULL;
+  if (SessionFile == NULL) {
+    return;
   }
+  if (Zctx != NULL) {
+    ZSTD_freeCCtx(Zctx);
+    Zctx = NULL;
+  }
+  fclose(SessionFile);
+  SessionFile = NULL;
+  FrameOpen = false;
+  if (StateCxt != NULL) {
+    MemoryContextDelete(StateCxt);
+    StateCxt = NULL;
+  }
+  Gucs = NULL;
+  Preps = NULL;
+  Tables = NULL;
+  Dirty = NULL;
+  Pending = NULL;
 }
 
 static void session_abandon(void) {
@@ -309,19 +494,49 @@ static void session_abandon(void) {
   unlink(SessionPath);
 }
 
-bool session_start(const char* name) {
-  session_stop();
-  session_path(name, SessionPath);
-
+static bool session_open(const char* path) {
   char dir[MAXPGPATH];
-  snprintf(dir, sizeof(dir), "%s", SessionPath);
+  snprintf(dir, sizeof(dir), "%s", path);
   *strrchr(dir, '/') = '\0';
   MakePGDirectory("sessions");
   MakePGDirectory(dir);
 
-  SessionFile = fopen(SessionPath, "wb");
-  if (SessionFile == NULL) {
-    ereport(WARNING, (errmsg("pgr: cannot create %s", SessionPath)));
+  FILE* f = fopen(path, "wb");
+  if (f == NULL) {
+    ereport(WARNING, (errmsg("pgr: cannot create %s", path)));
+    return false;
+  }
+  ZSTD_CCtx* z = ZSTD_createCCtx();
+  if (z == NULL) {
+    fclose(f);
+    unlink(path);
+    ereport(WARNING, (errmsg("pgr: could not create zstd context")));
+    return false;
+  }
+  ZSTD_CCtx_setParameter(z, ZSTD_c_compressionLevel, 3);
+
+  strlcpy(SessionPath, path, MAXPGPATH);
+  SessionFile = f;
+  Zctx = z;
+  FrameOpen = false;
+  StateCxt = AllocSetContextCreate(TopMemoryContext, "pgr session state",
+                                   ALLOCSET_DEFAULT_SIZES);
+  Gucs = kv_new("pgr gucs", StateCxt);
+  Preps = kv_new("pgr preps", StateCxt);
+  Tables = kv_new("pgr tables", StateCxt);
+  Dirty = oid_set_new();
+  Pending = oid_set_new();
+
+  return true;
+}
+
+bool session_start(const char* name) {
+  char path[MAXPGPATH];
+  session_path(name, path);
+  if (SessionFile != NULL && strcmp(path, SessionPath) != 0) {
+    session_stop();
+  }
+  if (SessionFile == NULL && !session_open(path)) {
     return false;
   }
   if (!guarded(start_body)) {
@@ -362,41 +577,74 @@ static char* c_str(Cur* c) {
   return s;
 }
 
+static size_t z_read(void* p, size_t n) {
+  ZSTD_outBuffer out = {p, n, 0};
+  while (out.pos < n) {
+    if (In.pos == In.size) {
+      In.size = fread(ZIn, 1, sizeof(ZIn), ReadFile);
+      In.pos = 0;
+      if (In.size == 0) {
+        break;
+      }
+    }
+    size_t r = ZSTD_decompressStream(Dctx, &out, &In);
+    if (ZSTD_isError(r)) {
+      ereport(ERROR, (errcode(ERRCODE_DATA_CORRUPTED),
+                      errmsg("pgr: zstd error: %s", ZSTD_getErrorName(r))));
+    }
+  }
+  return out.pos;
+}
+
 static void rd(void* p, size_t n) {
-  if (fread(p, 1, n, ReadFile) != n) {
+  if (z_read(p, n) != n) {
     ereport(ERROR, (errcode(ERRCODE_DATA_CORRUPTED),
                     errmsg("pgr: session file is truncated")));
   }
 }
 
-static uint32 rd_u32(void) {
-  uint32 v;
-  rd(&v, sizeof(v));
-  return v;
-}
-
-static uint64 rd_u64(void) {
-  uint64 v;
-  rd(&v, sizeof(v));
-  return v;
-}
-
-static char* rd_str(void) {
-  uint32 n = rd_u32();
-  char* s = palloc(n + 1);
-  rd(s, n);
-  s[n] = '\0';
-  return s;
+static bool rd_hdr(uint8* type, uint32* len) {
+  if (z_read(type, 1) != 1) {
+    return false;
+  }
+  rd(len, sizeof(*len));
+  return true;
 }
 
 static int load_cb(void* buf, int minread, int maxread) {
-  size_t want = (size_t)maxread;
-  if (want > ReadLeft) {
-    want = ReadLeft;
+  while (ChunkLeft == 0) {
+    if (ChunkDone) {
+      return 0;
+    }
+    uint8 type;
+    uint32 len;
+    if (!rd_hdr(&type, &len)) {
+      ereport(ERROR, (errcode(ERRCODE_DATA_CORRUPTED),
+                      errmsg("pgr: session file is truncated")));
+    }
+    if (type == SessTableEnd) {
+      ChunkDone = true;
+      return 0;
+    }
+    if (type != SessTableChunk) {
+      ereport(ERROR, (errcode(ERRCODE_DATA_CORRUPTED),
+                      errmsg("pgr: unexpected record in table data")));
+    }
+    ChunkLeft = len;
   }
-  size_t got = fread(buf, 1, want, ReadFile);
-  ReadLeft -= got;
-  return (int)got;
+  size_t want = (size_t)maxread;
+  if (want > ChunkLeft) {
+    want = ChunkLeft;
+  }
+  rd(buf, want);
+  ChunkLeft -= (uint32)want;
+  return (int)want;
+}
+
+static void drain_chunks(void) {
+  char tmp[8192];
+  while (load_cb(tmp, 1, sizeof(tmp)) > 0) {
+  }
 }
 
 static void exec_sql(const char* sql) {
@@ -405,22 +653,29 @@ static void exec_sql(const char* sql) {
   }
 }
 
-static void restore_table(uint64 len) {
-  off_t start = ftello(ReadFile);
-  char* tname = rd_str();
-  char* cols = rd_str();
-  char* post = rd_str();
-  ReadLeft = len - (uint64)(ftello(ReadFile) - start);
-
+static void drop_table(const char* tname) {
   StringInfoData sql;
   initStringInfo(&sql);
   appendStringInfo(&sql, "DROP TABLE IF EXISTS pg_temp.%s",
                    quote_identifier(tname));
   exec_sql(sql.data);
-  resetStringInfo(&sql);
+  pfree(sql.data);
+}
+
+static void restore_table(Cur* c) {
+  char* tname = c_str(c);
+  char* cols = c_str(c);
+  char* post = c_str(c);
+  ChunkLeft = 0;
+  ChunkDone = false;
+
+  drop_table(tname);
+  StringInfoData sql;
+  initStringInfo(&sql);
   appendStringInfo(&sql, "CREATE TEMP TABLE %s (%s)", quote_identifier(tname),
                    cols);
   exec_sql(sql.data);
+  pfree(sql.data);
 
   Relation rel =
       table_openrv(makeRangeVar("pg_temp", tname, -1), RowExclusiveLock);
@@ -434,22 +689,12 @@ static void restore_table(uint64 len) {
       BeginCopyFrom(pstate, rel, NULL, NULL, false, load_cb, NIL, opts);
   CopyFrom(cs);
   EndCopyFrom(cs);
+  drain_chunks();
   free_parsestate(pstate);
   table_close(rel, RowExclusiveLock);
 
   if (post[0]) {
     exec_sql(post);
-  }
-}
-
-static void apply_gucs(const char* buf) {
-  Cur c = {buf};
-  uint32 n = c_u32(&c);
-  for (uint32 i = 0; i < n; i++) {
-    char* name = c_str(&c);
-    char* val = c_str(&c);
-    set_config_option(name, val, superuser() ? PGC_SUSET : PGC_USERSET,
-                      PGC_S_SESSION, GUC_ACTION_SET, true, WARNING, false);
   }
 }
 
@@ -524,21 +769,15 @@ static void apply_one_prepared(const char* name,
 
 static void apply_prepared(const char* buf) {
   Cur c = {buf};
-  uint32 n = c_u32(&c);
-  for (uint32 i = 0; i < n; i++) {
-    char* name = c_str(&c);
-    bool from_sql = c_u8(&c);
-    char* q = c_str(&c);
-    uint16 np = c_u16(&c);
-    Oid* types = palloc((np + 1) * sizeof(Oid));
-    for (int j = 0; j < np; j++) {
-      types[j] = c_u32(&c);
-    }
-    if (name[0] == '\0') {
-      continue;
-    }
-    apply_one_prepared(name, from_sql, q, np, types);
+  char* name = c_str(&c);
+  bool from_sql = c_u8(&c);
+  char* q = c_str(&c);
+  uint16 np = c_u16(&c);
+  Oid* types = palloc((np + 1) * sizeof(Oid));
+  for (int j = 0; j < np; j++) {
+    types[j] = c_u32(&c);
   }
+  apply_one_prepared(name, from_sql, q, np, types);
 }
 
 static bool restore_guarded(void (*fn)(void)) {
@@ -573,49 +812,66 @@ static bool restore_guarded(void (*fn)(void)) {
   return ok;
 }
 
-typedef struct {
-  uint8 type;
-  uint64 len;
-  off_t next;
-} RestoreItem;
-
 static void restore_body(void) {
   if (SPI_connect() != SPI_OK_CONNECT) {
     elog(ERROR, "pgr: SPI_connect failed");
   }
 
-  char* gucs = NULL;
-  char* prep = NULL;
+  MemoryContext cx = CurrentMemoryContext;
+  HTAB* rgucs = kv_new("pgr restore gucs", cx);
+  HTAB* rpreps = kv_new("pgr restore preps", cx);
 
   for (;;) {
     uint8 type;
-    if (fread(&type, 1, 1, ReadFile) != 1) {
+    uint32 len;
+    if (!rd_hdr(&type, &len)) {
       break;
     }
-    uint64 len = rd_u64();
-    off_t next = ftello(ReadFile) + (off_t)len;
+    char* buf = palloc(len + 1);
+    rd(buf, len);
+    Cur c = {buf};
 
     switch (type) {
-      case SessGucs:
-        gucs = palloc(len);
-        rd(gucs, len);
+      case SessGucSet: {
+        char* name = c_str(&c);
+        char* val = c_str(&c);
+        kv_put(rgucs, cx, name, val, strlen(val) + 1);
         break;
-      case SessPrepared:
-        prep = palloc(len);
-        rd(prep, len);
+      }
+      case SessGucReset:
+        hash_search(rgucs, c_str(&c), HASH_REMOVE, NULL);
         break;
-      case SessTable:
-        restore_table(len);
+      case SessPrepPut: {
+        Cur k = {buf};
+        kv_put(rpreps, cx, c_str(&k), buf, len);
         break;
+      }
+      case SessPrepDrop:
+        hash_search(rpreps, c_str(&c), HASH_REMOVE, NULL);
+        break;
+      case SessTableBegin:
+        restore_table(&c);
+        break;
+      case SessTableDrop:
+        drop_table(c_str(&c));
+        break;
+      default:
+        ereport(ERROR, (errcode(ERRCODE_DATA_CORRUPTED),
+                        errmsg("pgr: unknown session record %d", type)));
     }
-    fseeko(ReadFile, next, SEEK_SET);
+    pfree(buf);
   }
 
-  if (gucs) {
-    apply_gucs(gucs);
+  HASH_SEQ_STATUS s;
+  Kv* e;
+  hash_seq_init(&s, rgucs);
+  while ((e = hash_seq_search(&s)) != NULL) {
+    set_config_option(e->key, e->data, superuser() ? PGC_SUSET : PGC_USERSET,
+                      PGC_S_SESSION, GUC_ACTION_SET, true, WARNING, false);
   }
-  if (prep) {
-    apply_prepared(prep);
+  hash_seq_init(&s, rpreps);
+  while ((e = hash_seq_search(&s)) != NULL) {
+    apply_prepared(e->data);
   }
 
   SPI_finish();
@@ -630,8 +886,18 @@ int session_restore(const char* name) {
     ereport(ERROR, (errcode_for_file_access(),
                     errmsg("pgr: cannot open \"%s\": %m", path)));
   }
+  Dctx = ZSTD_createDCtx();
+  if (Dctx == NULL) {
+    FreeFile(ReadFile);
+    ReadFile = NULL;
+    ereport(ERROR, (errmsg("pgr: could not create zstd context")));
+  }
+  In.pos = 0;
+  In.size = 0;
   bool ok = restore_guarded(restore_body);
 
+  ZSTD_freeDCtx(Dctx);
+  Dctx = NULL;
   FreeFile(ReadFile);
   ReadFile = NULL;
   return ok ? 1 : 0;

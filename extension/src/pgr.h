@@ -93,6 +93,8 @@ bool session_start(const char* name);
 void session_stop(void);
 bool session_active(void);
 int session_restore(const char* name);
+void session_mark_dirty(Oid relid);
+void session_xact_end(bool committed);
 
 // capture
 uint32 capture_start();

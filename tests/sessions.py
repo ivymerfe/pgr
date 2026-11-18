@@ -4,7 +4,32 @@ import glob
 
 from collections import Counter
 
+import zstandard
+
 from tests.base import DATA
+
+GUC_SET, GUC_RESET, PREP_PUT, PREP_DROP = 1, 2, 3, 4
+TBL_BEGIN, TBL_CHUNK, TBL_END, TBL_DROP = 5, 6, 7, 8
+GROUP = {
+    GUC_SET: 1,
+    GUC_RESET: 1,
+    PREP_PUT: 2,
+    PREP_DROP: 2,
+    TBL_BEGIN: 3,
+    TBL_CHUNK: 3,
+    TBL_END: 3,
+    TBL_DROP: 3,
+}
+
+
+def read_frames(path):
+    with open(path, "rb") as f:
+        return (
+            zstandard.ZstdDecompressor()
+            .stream_reader(f, read_across_frames=True)
+            .read()
+        )
+
 
 def rd_str(b, p):
     n = struct.unpack_from("<I", b, p)[0]
@@ -35,38 +60,55 @@ def parse_copy(b):
 
 
 def parse_session(path):
-    b = open(path, "rb").read()
-    res = {"size": len(b), "sizes": Counter(), "gucs": {}, "prep": [], "tables": {}}
+    b = read_frames(path)
+    res = {
+        "size": os.path.getsize(path),
+        "sizes": Counter(),
+        "gucs": {},
+        "prep": [],
+        "tables": {},
+    }
+    prep = {}
+    cur = None
     p = 0
     while p < len(b):
         t = b[p]
-        ln = struct.unpack_from("<Q", b, p + 1)[0]
-        body = b[p + 9 : p + 9 + ln]
-        p += 9 + ln
-        res["sizes"][t] += ln
-        if t == 1:
-            n = struct.unpack_from("<I", body, 0)[0]
-            q = 4
-            for _ in range(n):
-                k, q = rd_str(body, q)
-                v, q = rd_str(body, q)
-                res["gucs"][k] = v
-        elif t == 2:
-            n = struct.unpack_from("<I", body, 0)[0]
-            q = 4
-            for _ in range(n):
-                name, q = rd_str(body, q)
-                fs = body[q]
-                q += 1
-                sql, q = rd_str(body, q)
-                np_ = struct.unpack_from("<H", body, q)[0]
-                q += 2 + 4 * np_
-                res["prep"].append((name, fs, sql, np_))
-        elif t == 3:
+        ln = struct.unpack_from("<I", b, p + 1)[0]
+        body = b[p + 5 : p + 5 + ln]
+        p += 5 + ln
+        res["sizes"][GROUP[t]] += ln
+        if t == GUC_SET:
+            k, q = rd_str(body, 0)
+            v, q = rd_str(body, q)
+            res["gucs"][k] = v
+        elif t == GUC_RESET:
+            k, _ = rd_str(body, 0)
+            res["gucs"].pop(k, None)
+        elif t == PREP_PUT:
+            name, q = rd_str(body, 0)
+            fs = body[q]
+            q += 1
+            sql, q = rd_str(body, q)
+            np_ = struct.unpack_from("<H", body, q)[0]
+            prep[name] = (name, fs, sql, np_)
+        elif t == PREP_DROP:
+            name, _ = rd_str(body, 0)
+            prep.pop(name, None)
+        elif t == TBL_BEGIN:
             name, q = rd_str(body, 0)
             cols, q = rd_str(body, q)
             post, q = rd_str(body, q)
-            res["tables"][name] = (len(body), cols, post, parse_copy(body[q:]))
+            cur = [name, cols, post, bytearray()]
+        elif t == TBL_CHUNK:
+            cur[3] += body
+        elif t == TBL_END:
+            name, cols, post, data = cur
+            res["tables"][name] = (len(data), cols, post, parse_copy(bytes(data)))
+            cur = None
+        elif t == TBL_DROP:
+            name, _ = rd_str(body, 0)
+            res["tables"].pop(name, None)
+    res["prep"] = list(prep.values())
     return res
 
 

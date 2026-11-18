@@ -2,6 +2,7 @@
 
 #include "access/xact.h"
 #include "catalog/namespace.h"
+#include "catalog/pg_class.h"
 #include "executor/executor.h"
 #include "libpq/auth.h"
 #include "miscadmin.h"
@@ -9,11 +10,12 @@
 #include "nodes/plannodes.h"
 #include "optimizer/planner.h"
 #include "parser/analyze.h"
+#include "parser/parsetree.h"
 #include "storage/ipc.h"
 #include "storage/shmem.h"
 #include "tcop/tcopprot.h"
 #include "tcop/utility.h"
-#include "utils/elog.h"
+#include "utils/lsyscache.h"
 #include "utils/timestamp.h"
 
 static shmem_startup_hook_type prev_shmem_startup = NULL;
@@ -152,6 +154,7 @@ static bool capture_gate() {
 }
 
 static void tx_finish(bool committed) {
+  session_xact_end(committed);
   if (!TxOpen) {
     return;
   }
@@ -182,7 +185,7 @@ static void pgr_xact_callback(XactEvent event, void* arg) {
   }
   ensure_exit_registered();
   if ((event == XACT_EVENT_COMMIT || event == XACT_EVENT_PREPARE) &&
-      OidIsValid(GetTempToastNamespace())) {
+      HasTempNamespace()) {
     TempCommitted = true;
   }
   switch (event) {
@@ -295,6 +298,34 @@ static void pgr_pq_msg_close_hook(int close_type, const char* close_target) {
   }
 }
 
+static void mark_dirty_targets(PlannedStmt* pstmt) {
+  if (!session_active()) {
+    return;
+  }
+  int i = -1;
+  while ((i = bms_next_member(pstmt->resultRelationRelids, i)) >= 0) {
+    RangeTblEntry* rte = rt_fetch(i, pstmt->rtable);
+    if (rte->rtekind == RTE_RELATION &&
+        get_rel_persistence(rte->relid) == RELPERSISTENCE_TEMP) {
+      session_mark_dirty(rte->relid);
+    }
+  }
+}
+
+static void mark_dirty_copy(Node* parsetree) {
+  if (!session_active() || !IsA(parsetree, CopyStmt)) {
+    return;
+  }
+  CopyStmt* cs = (CopyStmt*)parsetree;
+  if (!cs->is_from || cs->relation == NULL) {
+    return;
+  }
+  Oid relid = RangeVarGetRelid(cs->relation, NoLock, true);
+  if (OidIsValid(relid) && get_rel_persistence(relid) == RELPERSISTENCE_TEMP) {
+    session_mark_dirty(relid);
+  }
+}
+
 static void pgr_ClientAuthentication_hook(struct Port* port, int status) {
   read_client_info(port);
   send_timing_event(MsgTypeConnect);
@@ -339,6 +370,9 @@ static PlannedStmt* pgr_planner_hook(Query* parse,
 
 static void pgr_ExecutorStart_hook(QueryDesc* queryDesc, int eflags) {
   IsUserTransaction = true;
+  if (!(eflags & EXEC_FLAG_EXPLAIN_ONLY)) {
+    mark_dirty_targets(queryDesc->plannedstmt);
+  }
   trace_begin();
   if (prev_ExecutorStart) {
     prev_ExecutorStart(queryDesc, eflags);
@@ -369,6 +403,7 @@ static void pgr_ProcessUtility_hook(PlannedStmt* pstmt,
                                     DestReceiver* dest,
                                     QueryCompletion* qc) {
   IsUserTransaction = true;
+  mark_dirty_copy(pstmt->utilityStmt);
   if (IsTransactionBlock()) {
     Node* parsetree = pstmt->utilityStmt;
     if (IsA(parsetree, TransactionStmt)) {

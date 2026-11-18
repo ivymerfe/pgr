@@ -25,10 +25,12 @@ pg_config = find_program('pg_config', required: true)
 r_inc = run_command(pg_config, '--includedir-server', check: true)
 r_lib = run_command(pg_config, '--pkglibdir', check: true)
 r_share = run_command(pg_config, '--sharedir', check: true)
+r_bin = run_command(pg_config, '--bindir', check: true)
 
 pg_inc = include_directories(r_inc.stdout().strip())
 pg_libdir = r_lib.stdout().strip()
 pg_sharedir = r_share.stdout().strip()
+pg_bindir = r_bin.stdout().strip()
 
 zstd_dep = dependency('libzstd')
 openssl_dep = dependency('openssl', required: false)
@@ -38,10 +40,17 @@ if openssl_dep.found()
   deps += openssl_dep
 endif
 
+link_args = []
+if host_machine.system() == 'darwin'
+  link_args += ['-bundle_loader', pg_bindir / 'postgres']
+endif
+
+
 shared_module('pgr',
   sources,
   include_directories: pg_inc,
   dependencies: deps,
+  link_args: link_args,
   name_prefix: '',
   install: true,
   install_dir: pg_libdir
