@@ -31,11 +31,17 @@ pg_libdir = r_lib.stdout().strip()
 pg_sharedir = r_share.stdout().strip()
 
 zstd_dep = dependency('libzstd')
+openssl_dep = dependency('openssl', required: false)
+deps = [zstd_dep]
+
+if openssl_dep.found()
+  deps += openssl_dep
+endif
 
 shared_module('pgr',
   sources,
   include_directories: pg_inc,
-  dependencies: [zstd_dep],
+  dependencies: deps,
   name_prefix: '',
   install: true,
   install_dir: pg_libdir
