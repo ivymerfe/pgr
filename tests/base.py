@@ -5,7 +5,7 @@ import time
 import re
 
 DATA = "./data"
-PGR = "./target/debug/pgr"
+PGR = "./target/release/pgr"
 
 
 def sh(*args, check=True):

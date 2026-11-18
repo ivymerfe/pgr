@@ -61,6 +61,7 @@ def main():
     capture_path = start_capture()
     bench.wait()
     stop_capture()
+    print_stats()
 
     before = snapshot()
 
@@ -71,9 +72,15 @@ def main():
 
     recover(lsn)
 
+    timings_path = start_timings()
     if replay(capture_path) != 0:
         print("replay failed")
+        stop_timings()
         return 2
+
+    print_stats()
+    stop_timings()
+    compare_timings(capture_path, timings_path)
 
     after = snapshot()
     total = compare(before, after)
