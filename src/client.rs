@@ -20,9 +20,8 @@ pub struct ReplayConfig {
     pub password: Option<String>,
     pub dbname: String,
     pub speed: f64,
+    pub latency: f64,
     pub threads: usize,
-    pub max_conns: usize,
-    pub max_rps: u32,
 }
 
 #[derive(Clone, Copy, PartialEq)]

@@ -66,22 +66,16 @@ enum Commands {
         )]
         speed: f64,
 
+        #[arg(
+            short,
+            long,
+            default_value_t = 3.0,
+            help = "Network latency in ms subtracted from client think time"
+        )]
+        latency: f64,
+
         #[arg(short, long, default_value_t = 4, help = "Worker threads")]
         threads: usize,
-
-        #[arg(
-            long,
-            default_value_t = 0,
-            help = "Max concurrent connections (0 = unlimited)"
-        )]
-        max_conns: usize,
-
-        #[arg(
-            long,
-            default_value_t = 0,
-            help = "Max requests per second (0 = unlimited)"
-        )]
-        max_rps: u32,
     },
     #[command(about = "Dump a capture, trace, timing or session file to text")]
     Dump {
@@ -173,9 +167,8 @@ fn run_command(cli: Cli) -> anyhow::Result<()> {
             user,
             pass,
             speed,
+            latency,
             threads,
-            max_conns,
-            max_rps,
         } => {
             let file = try_open(&input)?;
             let reader = CaptureReader::new(file)?;
@@ -189,9 +182,8 @@ fn run_command(cli: Cli) -> anyhow::Result<()> {
                 password: pass,
                 dbname,
                 speed,
+                latency,
                 threads: threads.max(1),
-                max_conns,
-                max_rps,
             };
             manager::replay(config, reader)?;
         }

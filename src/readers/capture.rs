@@ -59,6 +59,7 @@ pub struct CaptureMessage {
     pub id: ClientId,
     pub ts: u64,
     pub duration_us: u32,
+    pub think_us: u64,
     pub event_type: u8,
     pub event: ClientEvent,
 }
@@ -209,6 +210,7 @@ impl CaptureReader {
             id,
             ts,
             duration_us,
+            think_us: 0,
             event_type: t,
             event,
         })
