@@ -193,9 +193,6 @@ static void tx_finish(bool committed) {
     if (!CaptureLive && pg_atomic_read_u32(&Shmem->capture.wal_ready)) {
       go_live();
     }
-    if (CaptureLive) {
-      capture_tx_end(committed);
-    }
   }
   if (!CaptureLive) {
     capture_txbuf_reset();

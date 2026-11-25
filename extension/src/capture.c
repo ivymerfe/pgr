@@ -1,7 +1,5 @@
 #include "pgr.h"
 
-#include "access/xact.h"
-#include "access/xlog.h"
 #include "lib/stringinfo.h"
 #include "nodes/params.h"
 #include "utils/lsyscache.h"
@@ -150,6 +148,12 @@ void capture_disconnect() {
   cap_end();
 }
 
+void capture_simple_query(const char* query) {
+  cap_begin(MsgTypeSimpleQuery);
+  cap_str(query);
+  cap_end();
+}
+
 void capture_parse(const char* stmt_name,
                    const char* query,
                    Oid* types,
@@ -161,12 +165,6 @@ void capture_parse(const char* stmt_name,
   for (int i = 0; i < n; i++) {
     cap_u32(types ? types[i] : 0);
   }
-  cap_end();
-}
-
-void capture_simple_query(const char* query) {
-  cap_begin(MsgTypeSimpleQuery);
-  cap_str(query);
   cap_end();
 }
 
@@ -211,23 +209,14 @@ void capture_execute(const char* portal, long max_rows) {
   cap_end();
 }
 
-void capture_sync() {
-  cap_begin(MsgTypeSync);
-  cap_end();
-}
-
-void capture_tx_end(bool committed) {
-  return;
-  cap_begin(MsgTypeTxEnd);
-  cap_u8(committed);
-  cap_u32(GetTopTransactionIdIfAny());
-  cap_u64(GetXLogInsertRecPtr());
-  cap_end();
-}
-
 void capture_close(int close_type, const char* target) {
   cap_begin(MsgTypeClose);
   cap_u8((uint8_t)close_type);
   cap_str(target ? target : "");
+  cap_end();
+}
+
+void capture_sync() {
+  cap_begin(MsgTypeSync);
   cap_end();
 }

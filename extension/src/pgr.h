@@ -63,9 +63,8 @@ enum {
   MsgTypeParse,
   MsgTypeBind,
   MsgTypeExecute,
-  MsgTypeSync,
-  MsgTypeTxEnd,
   MsgTypeClose,
+  MsgTypeSync,
 };
 
 void setup_hooks();
@@ -104,8 +103,9 @@ void capture_txbuf_reset(void);
 void capture_go_live(const char* session);
 void capture_lsn(uint64_t lsn);
 void capture_disconnect(void);
-void capture_parse(const char* stmt_name, const char* query, Oid* types, int n);
+
 void capture_simple_query(const char* query);
+void capture_parse(const char* stmt_name, const char* query, Oid* types, int n);
 void capture_bind(const char* portal,
                   const char* stmt,
                   int nrf,
@@ -114,7 +114,6 @@ void capture_bind(const char* portal,
                   ParamListInfo params);
 void capture_execute(const char* portal, long max_rows);
 void capture_sync(void);
-void capture_tx_end(bool committed);
 void capture_close(int close_type, const char* target);
 
 // stats

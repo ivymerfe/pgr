@@ -14,9 +14,8 @@ pub const MSG_SIMPLE_QUERY: u8 = 4;
 pub const MSG_PARSE: u8 = 5;
 pub const MSG_BIND: u8 = 6;
 pub const MSG_EXECUTE: u8 = 7;
-pub const MSG_SYNC: u8 = 8;
-pub const MSG_TX_END: u8 = 9;
-pub const MSG_CLOSE: u8 = 10;
+pub const MSG_CLOSE: u8 = 8;
+pub const MSG_SYNC: u8 = 9;
 
 pub struct BindParam {
     pub type_oid: u32,
@@ -49,16 +48,11 @@ pub enum ClientEvent {
         portal: String,
         max_rows: i64,
     },
-    Sync,
-    TxEnd {
-        committed: bool,
-        xid: u32,
-        lsn: u64,
-    },
     Close {
         kind: u8,
         name: String,
     },
+    Sync,
 }
 
 pub struct CaptureMessage {
@@ -197,16 +191,11 @@ impl CaptureReader {
                 portal: self.string()?,
                 max_rows: self.u64()? as i64,
             },
-            MSG_SYNC => ClientEvent::Sync,
-            MSG_TX_END => ClientEvent::TxEnd {
-                committed: self.u8()? != 0,
-                xid: self.u32()?,
-                lsn: self.u64()?,
-            },
             MSG_CLOSE => ClientEvent::Close {
                 kind: self.u8()?,
                 name: self.string()?,
             },
+            MSG_SYNC => ClientEvent::Sync,
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,

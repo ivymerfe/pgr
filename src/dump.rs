@@ -110,15 +110,6 @@ pub fn dump_capture(mut reader: CaptureReader, output: File) -> anyhow::Result<(
             ClientEvent::Sync => {
                 head(&mut w, m.ts, base, m.id, "sync")?;
             }
-            ClientEvent::TxEnd {
-                committed,
-                xid,
-                lsn,
-            } => {
-                head(&mut w, m.ts, base, m.id, "tx_end")?;
-                text(&mut w, if committed { b"commit" } else { b"abort" })?;
-                write!(w, ",{},{}", xid, lsn)?;
-            }
             ClientEvent::Close { kind, name } => {
                 head(&mut w, m.ts, base, m.id, "close")?;
                 write!(w, ",{}", kind)?;
@@ -141,9 +132,8 @@ fn msg_name(t: u8) -> &'static str {
         MSG_PARSE => "parse",
         MSG_BIND => "bind",
         MSG_EXECUTE => "execute",
-        MSG_SYNC => "sync",
-        MSG_TX_END => "tx_end",
         MSG_CLOSE => "close",
+        MSG_SYNC => "sync",
         _ => "unknown",
     }
 }

@@ -3,7 +3,10 @@ use std::{
     io::{self, Read},
 };
 
-use crate::readers::{capture::ClientId, zstd::{ZReader, open_zstd}};
+use crate::readers::{
+    capture::ClientId,
+    zstd::{ZReader, open_zstd},
+};
 
 #[derive(Clone, Copy)]
 pub struct TraceData {

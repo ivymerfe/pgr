@@ -6,7 +6,6 @@ use tracing::{info, warn};
 
 use crate::readers::capture::{
     CaptureReader, ClientEvent, ClientId, MSG_CONNECT, MSG_DISCONNECT, MSG_LSN, MSG_SIMPLE_QUERY,
-    MSG_TX_END,
 };
 use crate::readers::timings::TimingReader;
 
@@ -114,7 +113,7 @@ pub fn compare(
             match capture_reader.read_event() {
                 Ok(Some(msg)) => {
                     let code = msg.event_type;
-                    if code != MSG_LSN && code != MSG_TX_END {
+                    if code != MSG_LSN {
                         let restore = matches!(
                             &msg.event,
                             ClientEvent::Connect { session_id } if !session_id.is_empty()

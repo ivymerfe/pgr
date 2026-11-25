@@ -243,7 +243,7 @@ fn query_frame(q: &str) -> Vec<u8> {
 
 fn encode(event: ClientEvent) -> Option<Vec<u8>> {
     Some(match event {
-        ClientEvent::Lsn { .. } | ClientEvent::TxEnd { .. } | ClientEvent::Connect { .. } => {
+        ClientEvent::Lsn { .. } | ClientEvent::Connect { .. } => {
             return None;
         }
         ClientEvent::Disconnect => proto::TERMINATE_MSG.to_vec(),

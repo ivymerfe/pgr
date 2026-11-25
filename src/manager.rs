@@ -110,10 +110,7 @@ pub fn replay(config: ReplayConfig, mut reader: CaptureReader) -> anyhow::Result
     loop {
         match reader.read_event() {
             Ok(Some(mut msg)) => {
-                if matches!(
-                    msg.event,
-                    ClientEvent::Lsn { .. } | ClientEvent::TxEnd { .. }
-                ) {
+                if matches!(msg.event, ClientEvent::Lsn { .. }) {
                     continue;
                 }
                 last = ((msg.ts.saturating_sub(base) as f64 / speed) as u64).max(last);
