@@ -22,12 +22,13 @@
 static shmem_startup_hook_type prev_shmem_startup = NULL;
 static shmem_startup_hook_type prev_shmem_request = NULL;
 
-static exec_parse_message_hook_type prev_exec_parse_message_hook = NULL;
-static exec_simple_query_hook_type prev_exec_simple_query_hook = NULL;
-static exec_bind_message_hook_type prev_exec_bind_message_hook = NULL;
-static exec_execute_message_hook_type prev_exec_execute_message_hook = NULL;
-static pq_msg_sync_hook_type prev_pq_msg_sync_hook = NULL;
-static pq_msg_close_hook_type prev_pq_msg_close_hook = NULL;
+static simple_query_hook_type prev_simple_query_hook = NULL;
+static parse_command_hook_type prev_parse_command_hook = NULL;
+static bind_command_hook_type prev_bind_command_hook = NULL;
+static execute_command_hook_type prev_execute_command_hook = NULL;
+static close_command_hook_type prev_close_command_hook = NULL;
+static sync_command_hook_type prev_sync_command_hook = NULL;
+static after_command_hook_type prev_after_command_hook = NULL;
 
 static ClientAuthentication_hook_type prev_ClientAuthentication = NULL;
 static post_parse_analyze_hook_type prev_post_parse_analyze = NULL;
@@ -238,42 +239,41 @@ static void pgr_xact_callback(XactEvent event, void* arg) {
   }
 }
 
-static void pgr_exec_parse_message_hook(const char* query_string,
-                                        const char* stmt_name,
-                                        Oid* paramTypes,
-                                        int numParams) {
-  stats_add_statement();
-  send_timing_event(MsgTypeParse);
-  StatementIndex++;
-  if (capture_gate()) {
-    capture_parse(stmt_name, query_string, paramTypes, numParams);
-  }
-  if (prev_exec_parse_message_hook) {
-    prev_exec_parse_message_hook(query_string, stmt_name, paramTypes,
-                                 numParams);
-  }
-}
-
-static void pgr_exec_simple_query_hook(const char* query_string) {
+static void pgr_simple_query_hook(const char* query_string) {
   stats_add_statement();
   send_timing_event(MsgTypeSimpleQuery);
   StatementIndex++;
   if (capture_gate()) {
     capture_simple_query(query_string);
   }
-  if (prev_exec_simple_query_hook) {
-    prev_exec_simple_query_hook(query_string);
+  if (prev_simple_query_hook) {
+    prev_simple_query_hook(query_string);
   }
 }
 
-static void pgr_exec_bind_message_hook(const char* portal_name,
-                                       const char* stmt_name,
-                                       int numPFormats,
-                                       int16* pformats,
-                                       int numRFormats,
-                                       int16* rformats,
-                                       int numParams,
-                                       ParamListInfo params) {
+static void pgr_parse_command_hook(const char* query_string,
+                                   const char* stmt_name,
+                                   Oid* paramTypes,
+                                   int numParams) {
+  stats_add_statement();
+  send_timing_event(MsgTypeParse);
+  StatementIndex++;
+  if (capture_gate()) {
+    capture_parse(stmt_name, query_string, paramTypes, numParams);
+  }
+  if (prev_parse_command_hook) {
+    prev_parse_command_hook(query_string, stmt_name, paramTypes, numParams);
+  }
+}
+
+static void pgr_bind_command_hook(const char* portal_name,
+                                  const char* stmt_name,
+                                  int numPFormats,
+                                  int16* pformats,
+                                  int numRFormats,
+                                  int16* rformats,
+                                  int numParams,
+                                  ParamListInfo params) {
   stats_add_statement();
   send_timing_event(MsgTypeBind);
   StatementIndex++;
@@ -281,72 +281,49 @@ static void pgr_exec_bind_message_hook(const char* portal_name,
     capture_bind(portal_name, stmt_name, numRFormats, rformats, numParams,
                  params);
   }
-  if (prev_exec_bind_message_hook) {
-    prev_exec_bind_message_hook(portal_name, stmt_name, numPFormats, pformats,
-                                numRFormats, rformats, numParams, params);
+  if (prev_bind_command_hook) {
+    prev_bind_command_hook(portal_name, stmt_name, numPFormats, pformats,
+                           numRFormats, rformats, numParams, params);
   }
 }
 
-static void pgr_exec_execute_message_hook(const char* portal_name,
-                                          long max_rows) {
+static void pgr_execute_command_hook(const char* portal_name, long max_rows) {
   stats_add_statement();
   send_timing_event(MsgTypeExecute);
   StatementIndex++;
   if (capture_gate()) {
     capture_execute(portal_name, max_rows);
   }
-  if (prev_exec_execute_message_hook) {
-    prev_exec_execute_message_hook(portal_name, max_rows);
+  if (prev_execute_command_hook) {
+    prev_execute_command_hook(portal_name, max_rows);
   }
 }
 
-static void pgr_pq_msg_sync_hook() {
-  stats_add_statement();
-  send_timing_event(MsgTypeSync);
-  if (capture_gate()) {
-    capture_sync();
-  }
-  if (prev_pq_msg_sync_hook) {
-    prev_pq_msg_sync_hook();
-  }
-}
-
-static void pgr_pq_msg_close_hook(int close_type, const char* close_target) {
+static void pgr_close_command_hook(int close_type, const char* close_target) {
   stats_add_statement();
   send_timing_event(MsgTypeClose);
   if (capture_gate()) {
     capture_close(close_type, close_target);
   }
-  if (prev_pq_msg_close_hook) {
-    prev_pq_msg_close_hook(close_type, close_target);
+  if (prev_close_command_hook) {
+    prev_close_command_hook(close_type, close_target);
   }
 }
 
-static void mark_dirty_targets(PlannedStmt* pstmt) {
-  if (!session_active()) {
-    return;
+static void pgr_sync_command_hook() {
+  stats_add_statement();
+  send_timing_event(MsgTypeSync);
+  if (capture_gate()) {
+    capture_sync();
   }
-  int i = -1;
-  while ((i = bms_next_member(pstmt->resultRelationRelids, i)) >= 0) {
-    RangeTblEntry* rte = rt_fetch(i, pstmt->rtable);
-    if (rte->rtekind == RTE_RELATION &&
-        get_rel_persistence(rte->relid) == RELPERSISTENCE_TEMP) {
-      session_mark_dirty(rte->relid);
-    }
+  if (prev_sync_command_hook) {
+    prev_sync_command_hook();
   }
 }
 
-static void mark_dirty_copy(Node* parsetree) {
-  if (!session_active() || !IsA(parsetree, CopyStmt)) {
-    return;
-  }
-  CopyStmt* cs = (CopyStmt*)parsetree;
-  if (!cs->is_from || cs->relation == NULL) {
-    return;
-  }
-  Oid relid = RangeVarGetRelid(cs->relation, NoLock, true);
-  if (OidIsValid(relid) && get_rel_persistence(relid) == RELPERSISTENCE_TEMP) {
-    session_mark_dirty(relid);
+static void pgr_after_command_hook(int command) {
+  if (prev_after_command_hook) {
+    prev_after_command_hook(command);
   }
 }
 
@@ -392,6 +369,20 @@ static PlannedStmt* pgr_planner_hook(Query* parse,
   return result;
 }
 
+static void mark_dirty_targets(PlannedStmt* pstmt) {
+  if (!session_active()) {
+    return;
+  }
+  int i = -1;
+  while ((i = bms_next_member(pstmt->resultRelationRelids, i)) >= 0) {
+    RangeTblEntry* rte = rt_fetch(i, pstmt->rtable);
+    if (rte->rtekind == RTE_RELATION &&
+        get_rel_persistence(rte->relid) == RELPERSISTENCE_TEMP) {
+      session_mark_dirty(rte->relid);
+    }
+  }
+}
+
 static void pgr_ExecutorStart_hook(QueryDesc* queryDesc, int eflags) {
   IsUserTransaction = true;
   if (!(eflags & EXEC_FLAG_EXPLAIN_ONLY)) {
@@ -416,6 +407,20 @@ static void pgr_ExecutorRun_hook(QueryDesc* queryDesc,
     standard_ExecutorRun(queryDesc, direction, count);
   }
   trace_end('E');
+}
+
+static void mark_dirty_copy(Node* parsetree) {
+  if (!session_active() || !IsA(parsetree, CopyStmt)) {
+    return;
+  }
+  CopyStmt* cs = (CopyStmt*)parsetree;
+  if (!cs->is_from || cs->relation == NULL) {
+    return;
+  }
+  Oid relid = RangeVarGetRelid(cs->relation, NoLock, true);
+  if (OidIsValid(relid) && get_rel_persistence(relid) == RELPERSISTENCE_TEMP) {
+    session_mark_dirty(relid);
+  }
 }
 
 static void pgr_ProcessUtility_hook(PlannedStmt* pstmt,
@@ -474,23 +479,26 @@ void setup_hooks() {
   prev_shmem_startup = shmem_startup_hook;
   shmem_startup_hook = pgr_shmem_startup_hook;
 
-  prev_exec_parse_message_hook = exec_parse_message_hook;
-  exec_parse_message_hook = pgr_exec_parse_message_hook;
+  prev_simple_query_hook = simple_query_hook;
+  simple_query_hook = pgr_simple_query_hook;
 
-  prev_exec_simple_query_hook = exec_simple_query_hook;
-  exec_simple_query_hook = pgr_exec_simple_query_hook;
+  prev_parse_command_hook = parse_command_hook;
+  parse_command_hook = pgr_parse_command_hook;
 
-  prev_exec_bind_message_hook = exec_bind_message_hook;
-  exec_bind_message_hook = pgr_exec_bind_message_hook;
+  prev_bind_command_hook = bind_command_hook;
+  bind_command_hook = pgr_bind_command_hook;
 
-  prev_exec_execute_message_hook = exec_execute_message_hook;
-  exec_execute_message_hook = pgr_exec_execute_message_hook;
+  prev_execute_command_hook = execute_command_hook;
+  execute_command_hook = pgr_execute_command_hook;
 
-  prev_pq_msg_sync_hook = pq_msg_sync_hook;
-  pq_msg_sync_hook = pgr_pq_msg_sync_hook;
+  prev_close_command_hook = close_command_hook;
+  close_command_hook = pgr_close_command_hook;
 
-  prev_pq_msg_close_hook = pq_msg_close_hook;
-  pq_msg_close_hook = pgr_pq_msg_close_hook;
+  prev_sync_command_hook = sync_command_hook;
+  sync_command_hook = pgr_sync_command_hook;
+
+  prev_after_command_hook = after_command_hook;
+  after_command_hook = pgr_after_command_hook;
 
   prev_ClientAuthentication = ClientAuthentication_hook;
   ClientAuthentication_hook = pgr_ClientAuthentication_hook;
