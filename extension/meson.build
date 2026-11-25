@@ -45,11 +45,13 @@ if host_machine.system() == 'darwin'
   link_args += ['-bundle_loader', pg_bindir / 'postgres']
 endif
 
+cc = meson.get_compiler('c')
 
 shared_module('pgr',
   sources,
   include_directories: pg_inc,
   dependencies: deps,
+  c_args: cc.get_supported_arguments('-Wno-unused-parameter'),
   link_args: link_args,
   name_prefix: '',
   install: true,

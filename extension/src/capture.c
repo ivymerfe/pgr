@@ -87,7 +87,8 @@ static void cap_end() {
   } else if (CaptureBufferPos > 0) {
     if (CaptureLive) {
       if (!channel_push(ChanCapture, CaptureBuffer, CaptureBufferPos)) {
-        ereport(WARNING, (errmsg("pgr: capture channel full, message dropped")));
+        ereport(WARNING,
+                (errmsg("pgr: capture channel full, message dropped")));
       }
     } else {
       txbuf_add(CaptureBuffer, CaptureBufferPos);
@@ -125,7 +126,8 @@ void capture_go_live(const char* session) {
       memcpy(&l, TxBuf.data + pos, sizeof(l));
       pos += sizeof(l);
       if (!channel_push(ChanCapture, TxBuf.data + pos, l)) {
-        ereport(WARNING, (errmsg("pgr: capture channel full while writing pending tx")));
+        ereport(WARNING,
+                (errmsg("pgr: capture channel full while writing pending tx")));
       }
       pos += l;
     }
@@ -133,14 +135,14 @@ void capture_go_live(const char* session) {
   capture_txbuf_reset();
 }
 
-void capture_sync_lsn() {
+void capture_lsn(uint64_t lsn) {
   cap_begin(MsgTypeLsn);
-  cap_u64(GetXLogInsertRecPtr());
+  cap_u64(lsn);
   if (!channel_push(ChanCapture, CaptureBuffer, CaptureBufferPos)) {
     ereport(WARNING, (errmsg("pgr: capture channel full, failed to send lsn")));
   }
   CaptureBufferPos = 0;
-  pg_atomic_write_u32(&Shmem->capture.wal_ready, 1);
+  CaptureOverflow = false;
 }
 
 void capture_disconnect() {

@@ -1,6 +1,7 @@
 #include "pgr.h"
 
 #include "access/xact.h"
+#include "access/xlog.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_class.h"
 #include "executor/executor.h"
@@ -93,6 +94,32 @@ static void ensure_exit_registered(void) {
   }
 }
 
+static uint32 tx_enter_shared() {
+  CaptureState* c = &Shmem->capture;
+  uint32 gen;
+  SpinLockAcquire(&c->lock);
+  c->open_xacts += 1;
+  gen = channel_running(ChanCapture) ? channel_generation(ChanCapture) : 0;
+  SpinLockRelease(&c->lock);
+  return gen;
+}
+
+static void tx_leave_shared(uint32 gen) {
+  CaptureState* c = &Shmem->capture;
+
+  SpinLockAcquire(&c->lock);
+  c->open_xacts -= 1;
+  if (channel_running(ChanCapture) && gen != channel_generation(ChanCapture) &&
+      c->pending_xacts > 0) {
+    c->pending_xacts -= 1;
+    if (c->pending_xacts == 0) {
+      capture_lsn(GetXLogInsertRecPtr());
+      pg_atomic_write_u32(&Shmem->capture.wal_ready, 1);
+    }
+  }
+  SpinLockRelease(&c->lock);
+}
+
 static void go_live() {
   bool ok = session_active();
   session_stop();
@@ -105,7 +132,7 @@ static bool capture_gate() {
     return false;
   }
   if (!TxOpen && IsTransactionState()) {
-    TxGen = xact_enter_shared();
+    TxGen = tx_enter_shared();
     TxOpen = true;
     TxCaptured = false;
     if (!CaptureLive) {
@@ -159,7 +186,7 @@ static void tx_finish(bool committed) {
     return;
   }
   TxOpen = false;
-  bool last = xact_leave_shared(TxGen);
+  tx_leave_shared(TxGen);
   if (TxCaptured && channel_running(ChanCapture) &&
       MyCaptureGen == channel_generation(ChanCapture)) {
     if (!CaptureLive && pg_atomic_read_u32(&Shmem->capture.wal_ready)) {
@@ -174,9 +201,6 @@ static void tx_finish(bool committed) {
     LastTxStatementCount = 0;
   }
   TxCaptured = false;
-  if (last) {
-    capture_sync_lsn();
-  }
 }
 
 static void pgr_xact_callback(XactEvent event, void* arg) {

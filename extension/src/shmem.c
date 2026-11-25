@@ -1,5 +1,7 @@
 #include "pgr.h"
 
+#include "access/xlog.h"
+
 SharedMemory* Shmem = NULL;
 
 void shmem_init() {
@@ -28,43 +30,19 @@ uint32 capture_start() {
   c->pending_xacts = c->open_xacts;
   nothing_pending = c->pending_xacts == 0;
   channel_publish(ChanCapture, id);
+  if (nothing_pending) {
+    capture_lsn(GetXLogInsertRecPtr());
+    pg_atomic_write_u32(&Shmem->capture.wal_ready, 1);
+  }
   SpinLockRelease(&c->lock);
 
   channel_ensure_worker(ChanCapture);
   channel_wakeup(ChanCapture);
-  if (nothing_pending) {
-    capture_sync_lsn();
-  }
   return id;
 }
 
 uint32 acquire_client_id() {
   return pg_atomic_fetch_add_u32(&Shmem->capture.next_client_id, 1);
-}
-
-uint32 xact_enter_shared() {
-  CaptureState* c = &Shmem->capture;
-  uint32 gen;
-  SpinLockAcquire(&c->lock);
-  c->open_xacts += 1;
-  gen = channel_running(ChanCapture) ? channel_generation(ChanCapture) : 0;
-  SpinLockRelease(&c->lock);
-  return gen;
-}
-
-bool xact_leave_shared(uint32 gen) {
-  CaptureState* c = &Shmem->capture;
-  bool last = false;
-  
-  SpinLockAcquire(&c->lock);
-  c->open_xacts -= 1;
-  if (channel_running(ChanCapture) && gen != channel_generation(ChanCapture) &&
-      c->pending_xacts > 0) {
-    c->pending_xacts -= 1;
-    last = c->pending_xacts == 0;
-  }
-  SpinLockRelease(&c->lock);
-  return last;
 }
 
 void init_stats() {
