@@ -30,6 +30,8 @@ static close_command_hook_type prev_close_command_hook = NULL;
 static sync_command_hook_type prev_sync_command_hook = NULL;
 static after_command_hook_type prev_after_command_hook = NULL;
 
+static emit_log_hook_type prev_emit_log_hook = NULL;
+
 static ClientAuthentication_hook_type prev_ClientAuthentication = NULL;
 static post_parse_analyze_hook_type prev_post_parse_analyze = NULL;
 static planner_hook_type prev_planner = NULL;
@@ -319,8 +321,18 @@ static void pgr_sync_command_hook() {
 }
 
 static void pgr_after_command_hook(int command) {
+  capture_cmd_end(TxOpen);
   if (prev_after_command_hook) {
     prev_after_command_hook(command);
+  }
+}
+
+static void pgr_emit_log_hook(ErrorData* edata) {
+  if (edata->elevel >= ERROR) {
+    capture_cmd_end(TxOpen);
+  }
+  if (prev_emit_log_hook) {
+    prev_emit_log_hook(edata);
   }
 }
 
@@ -496,6 +508,9 @@ void setup_hooks() {
 
   prev_after_command_hook = after_command_hook;
   after_command_hook = pgr_after_command_hook;
+
+  prev_emit_log_hook = emit_log_hook;
+  emit_log_hook = pgr_emit_log_hook;
 
   prev_ClientAuthentication = ClientAuthentication_hook;
   ClientAuthentication_hook = pgr_ClientAuthentication_hook;

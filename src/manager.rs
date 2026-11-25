@@ -60,6 +60,7 @@ impl Router {
             let _ = self.txs[idx].send(CaptureMessage {
                 id,
                 ts,
+                duration_us: 0,
                 event_type: MSG_DISCONNECT,
                 event,
             });

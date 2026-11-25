@@ -58,6 +58,7 @@ pub enum ClientEvent {
 pub struct CaptureMessage {
     pub id: ClientId,
     pub ts: u64,
+    pub duration_us: u32,
     pub event_type: u8,
     pub event: ClientEvent,
 }
@@ -137,6 +138,7 @@ impl CaptureReader {
     fn read_body(&mut self, t: u8) -> io::Result<CaptureMessage> {
         let id = self.u32()?;
         let ts = self.u64()?;
+        let duration_us = self.u32()?;
         let event = match t {
             MSG_LSN => ClientEvent::Lsn { lsn: self.u64()? },
             MSG_CONNECT => ClientEvent::Connect {
@@ -206,6 +208,7 @@ impl CaptureReader {
         Ok(CaptureMessage {
             id,
             ts,
+            duration_us,
             event_type: t,
             event,
         })

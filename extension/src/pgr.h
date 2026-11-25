@@ -99,11 +99,12 @@ void session_xact_end(bool committed);
 uint32 capture_start();
 uint32 acquire_client_id();
 
+void capture_cmd_end(bool tx_open);
 void capture_txbuf_reset(void);
 void capture_go_live(const char* session);
 void capture_lsn(uint64_t lsn);
-void capture_disconnect(void);
 
+void capture_disconnect(void);
 void capture_simple_query(const char* query);
 void capture_parse(const char* stmt_name, const char* query, Oid* types, int n);
 void capture_bind(const char* portal,
@@ -113,8 +114,8 @@ void capture_bind(const char* portal,
                   int np,
                   ParamListInfo params);
 void capture_execute(const char* portal, long max_rows);
-void capture_sync(void);
 void capture_close(int close_type, const char* target);
+void capture_sync(void);
 
 // stats
 void init_stats();
