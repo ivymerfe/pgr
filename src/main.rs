@@ -99,9 +99,14 @@ enum Commands {
         #[arg(short, long, value_parser = parse_absolute, help = "Replay timing file")]
         timing: PathBuf,
     },
-    #[command(about = "Print WAL sync point of an extension capture")]
+    #[command(about = "Print WAL sync point of a capture")]
     Lsn {
-        #[arg(value_parser = parse_absolute, help = "Extension capture file or directory")]
+        #[arg(value_parser = parse_absolute, help = "Capture file")]
+        input: PathBuf,
+    },
+    #[command(about = "Print start timestamp of a capture")]
+    Ts {
+        #[arg(value_parser = parse_absolute, help = "Capture file")]
         input: PathBuf,
     },
     #[command(about = "Analyze trace")]
@@ -238,8 +243,12 @@ fn run_command(cli: Cli) -> anyhow::Result<()> {
         Commands::Lsn { input } => {
             let file = try_open(&input)?;
             let reader = CaptureReader::new(file)?;
-            info!("LSN: {:X}/{:08X}", reader.lsn >> 32, reader.lsn as u32);
-            info!("TS: {}", reader.start_ts)
+            print!("{:X}/{:08X}", reader.lsn >> 32, reader.lsn as u32);
+        }
+        Commands::Ts { input } => {
+            let file = try_open(&input)?;
+            let reader = CaptureReader::new(file)?;
+            print!("{}", reader.start_ts)
         }
         Commands::Analyze {
             capture,

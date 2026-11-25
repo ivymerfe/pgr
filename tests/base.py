@@ -116,12 +116,7 @@ def compare_timings(capture_path, timings_path):
 
 
 def get_lsn(capture_path):
-    out = sh(PGR, "lsn", capture_path)
-    m = re.search(r"LSN:\s*([0-9A-Fa-f]+/[0-9A-Fa-f]+)", out.stdout + out.stderr)
-    if not m:
-        return None
-
-    return m.group(1)
+    return sh(PGR, "lsn", capture_path).stdout
 
 
 def wait_promoted():

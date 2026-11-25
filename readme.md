@@ -1,28 +1,31 @@
 # pgr
 
-![logo](assets/logo.png)
-
 Захват и воспроизведение нагрузки на postgres
 
 ## Содержание
 
-- [Расширение](#расширение)
-  - [Установка](#установка)
-  - [Команды](#команды)
-  - [Сборка](#сборка)
-- [Утилита](#утилита-1)
-  - [Команды](#команды-1)
-  - [Сборка](#сборка-1)
+- [Сборка и установка](#сборка-и-установка)
 - [Пример](#пример)
+- [Функции расширения](#функции-расширения)
+- [Функции программы](#функции-программы)
 - [Тесты](#тесты)
 
-## Расширение
+## Сборка и установка
 
-Сохраняет нагрузку и сессии клиентов
+Нужен [meson](https://mesonbuild.com/) и [rust](https://rust-lang.org/tools/install/)
 
-### Установка
+Расширение
+```bash
+meson setup extension/build
+meson install -C extension/build
+```
 
-Расширение нужно подключить через `shared_preload_libraries` и перезапустить сервер:
+Программа (соберется в ./target/release/pgr)
+```bash
+cargo build --release
+```
+
+Прописываем и создаем расширение:
 
 ```
 shared_preload_libraries = 'pgr'
@@ -30,95 +33,6 @@ shared_preload_libraries = 'pgr'
 
 ```sql
 CREATE EXTENSION pgr;
-```
-
-### Команды
-
-- `pgr.cstart() -> id`
-
-Начинает запись.
-Файл с дампом будет в (data directory)/captures/{id}.pr
-
-- `pgr.cstop()`
-
-Останавливает запись
-
-- `pgr.tstart() -> id`
-
-Начинает запись trace выполнения запросов
-
-- `pgr.tstop()`
-
-Останавливает запись trace
-
-- `pgr.getstats() -> (commits, rollbacks, failed_commits)`
-
-Счётчики транзакций: коммиты, откаты, неудавшиеся коммиты
-
-- `pgr.resetstats()`
-
-Сбрасывает счётчики
-
-- `pgr.sdump(name) -> int`
-
-Сохраняет состояние сессии в (data directory)/sessions/{name}.pgs:
-изменённые GUC, подготовленные запросы и временные таблицы с данными.
-Возвращает 1 при успехе, 0 при ошибке
-
-- `pgr.srestore(name) -> int`
-
-Восстанавливает состояние сессии из файла. При воспроизведении
-утилита вызывает её сама для каждого подключения с сохранённой сессией
-
-### Сборка
-
-Нужен [meson](https://mesonbuild.com/)
-
-```bash
-meson setup build
-meson install -C build
-```
-
-## Утилита
-
-Воспроизводит нагрузку и там еще умеет кое что
-
-### Команды
-
-- `replay <capture>`
-
-Воспроизводит захват на другой базе
-
-| Опция          | По умолчанию | Описание      |
-| -------------- | ------------ | ------------- |
-| `-h, --host`   | 127.0.0.1    | Адрес сервера |
-| `-p, --port`   | 5432         | Порт          |
-| `-d, --dbname` | postgres     | База данных   |
-| `-u, --user`   | $USER        | Пользователь  |
-| `-P, --pass`   | -            | Пароль        |
-
-- `dump <capture> [-o capture.csv]`
-
-Выгружает захват в CSV
-
-- `lsn <capture>`
-
-Показывает точку синхронизации WAL и время начала захвата
-
-- `analyze -c <capture> -t <trace> [-o analysis] [--chunk 0.05] [-a 127.0.0.1] [-p 3232]`
-
-Сопоставляет trace с захватом, сохраняет результат в папку и запускает веб-сервер
-
-- `view [folder] [-a 127.0.0.1] [-p 3232]`
-
-Запускает сервер для готового анализа
-
-### Сборка
-
-Нужен [rust](https://rust-lang.org/tools/install/)
-
-```bash
-cargo build --release
 ```
 
 ## Пример
@@ -130,9 +44,71 @@ SELECT pgr.cstop();
 ```
 
 ```bash
-pgr lsn captures/1.pr
+pgr lsn captures/1.pr # читает lsn, базу откатываем сами
 pgr replay captures/1.pr -h 127.0.0.1 -p 5432 -d test -u postgres
 ```
+
+## Функции расширения
+
+- `pgr.cstart() -> id`
+
+Начать запись запросов в {data}/captures/{id}.pr
+
+- `pgr.cstop()`
+
+Останавливает запись
+
+- `pgr.timestart() -> id`
+
+Начинает запись таймингов в {data}/timings/{id}.pr
+
+- `pgr.timestop()`
+
+Останавливает запись
+
+- `pgr.getstats() -> (commits, rollbacks, failed_commits)`
+
+Счётчики транзакций: коммиты, откаты, неудавшиеся коммиты
+
+- `pgr.resetstats()`
+
+Сбрасывает счётчики
+
+- `pgr.sdump(name) -> int`
+
+Сохраняет состояние в {data}/sessions/{name}.pgs:
+Возвращает 1 при успехе, 0 при ошибке
+
+- `pgr.srestore(name) -> int`
+
+Восстанавливает сосстояние из файла
+Возвращает 1 при успехе, 0 при ошибке
+
+## Функции программы
+
+- `replay <capture>`
+
+Собственно воспроизведение
+
+| Опция          | По умолчанию | Описание      |
+| -------------- | ------------ | ------------- |
+| `-h, --host`   | 127.0.0.1    | Адрес сервера |
+| `-p, --port`   | 5432         | Порт          |
+| `-d, --dbname` | postgres     | База данных   |
+| `-u, --user`   | $USER        | Пользователь  |
+| `-P, --pass`   | -            | Пароль        |
+
+- `lsn <capture>`
+
+Читает точку синхронизации WAL
+
+- `ts <capture>`
+
+Читает время начала захвата
+
+- `dump <capture/session/timings/traces> [-o file.csv]`
+
+Преобразует бинарный файл от расширения в читаемый вид
 
 ## Тесты
 
@@ -142,5 +118,7 @@ pgr replay captures/1.pr -h 127.0.0.1 -p 5432 -d test -u postgres
 
 ```bash
 python3 -m tests.pgbench
-python3 -m tests.miniroznica
+python3 -m tests.roz_1c2s
+python3 -m tests.roz_5c20s
+python3 -m tests.roz_10c6s
 ```
